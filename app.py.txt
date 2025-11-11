@@ -1,0 +1,105 @@
+import os
+if state_like:
+sql.append("AND state LIKE :st")
+params['st'] = f"%{state_like}%"
+
+
+with engine.begin() as conn:
+df = pd.read_sql(text("\n".join(sql)), conn, params=params)
+return df
+
+
+
+
+def contact_editor(engine, row):
+st.markdown("---")
+st.markdown(f"### ✏️ Edit: {row['first_name']} {row['last_name']} — {row['company']}")
+with st.form(f"edit_{row['id']}"):
+c1, c2, c3 = st.columns(3)
+with c1:
+first = st.text_input("First name", row['first_name'] or "")
+job = st.text_input("Job title", row['job_title'] or "")
+phone = st.text_input("Phone", row['phone'] or "")
+with c2:
+last = st.text_input("Last name", row['last_name'] or "")
+company = st.text_input("Company", row['company'] or "")
+email = st.text_input("Email", row['email'] or "")
+with c3:
+category = st.selectbox("Category", ["PhD/Student","Professor/Academic","Academic","Academic/Staff","Industry","Other"], index=0 if not row['category'] else ["PhD/Student","Professor/Academic","Academic","Academic/Staff","Industry","Other"].index(row['category']))
+status = st.selectbox("Status", PIPELINE, index=PIPELINE.index(row['status']) if row['status'] in PIPELINE else 0)
+owner = st.text_input("Owner", (row['owner'] or ""))
+
+
+st.write("**Address**")
+st.text_input("Street", row['street'] or "", key=f"street_{row['id']}")
+st.text_input("Street 2", row['street2'] or "", key=f"street2_{row['id']}")
+st.text_input("City", row['city'] or "", key=f"city_{row['id']}")
+st.text_input("State/Province", row['state'] or "", key=f"state_{row['id']}")
+st.text_input("ZIP", row['zip_code'] or "", key=f"zip_{row['id']}")
+st.text_input("Country", row['country'] or "", key=f"country_{row['id']}")
+website = st.text_input("Website", row['website'] or "")
+
+
+submitted = st.form_submit_button("Save changes")
+if submitted:
+with engine.begin() as conn:
+# status change history
+if row['status'] != status:
+conn.execute(text("INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (:id,:ts,:old,:new)"),
+{"id": int(row['id']), "ts": datetime.utcnow().isoformat(), "old": row['status'], "new": status})
+conn.execute(text(
+"""
+UPDATE contacts SET first_name=:first, last_name=:last, job_title=:job, company=:company,
+phone=:phone, email=:email, category=:category, status=:status, owner=:owner,
+street=:street, street2=:street2, city=:city, state=:state, zip_code=:zip, country=:country, website=:website,
+last_touch=:lt
+WHERE id=:id
+"""),
+{
+"first": first, "last": last, "job": job, "company": company, "phone": phone,
+"email": email.lower().strip() if email else None, "category": category, "status": status,
+"owner": owner,
+"street": st.session_state.get(f"street_{row['id']}") or None,
+"street2": st.session_state.get(f"street2_{row['id']}") or None,
+"city": st.session_state.get(f"city_{row['id']}") or None,
+"state": st.session_state.get(f"state_{row['id']}") or None,
+"zip": st.session_state.get(f"zip_{row['id']}") or None,
+"country": st.session_state.get(f"country_{row['id']}") or None,
+"website": website or None,
+"lt": datetime.utcnow().isoformat(),
+"id": int(row['id'])
+}
+)
+st.success("Saved")
+st.experimental_rerun()
+
+
+st.markdown("#### 🗒️ Notes")
+new_note = st.text_area("Add a note", placeholder="Called; left voicemail…")
+next_fu = st.date_input("Next follow-up", value=None)
+if st.button("Add note", key=f"note_{row['id']}"):
+if new_note.strip():
+with engine.begin() as conn:
+conn.execute(text("INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (:id,:ts,:body,:fu)"),
+{"id": int(row['id']), "ts": datetime.utcnow().isoformat(), "body": new_note.strip(),
+"fu": next_fu.isoformat() if isinstance(next_fu, date) else None})
+conn.execute(text("UPDATE contacts SET last_touch=:lt WHERE id=:id"),
+{"lt": datetime.utcnow().isoformat(), "id": int(row['id'])})
+st.success("Note added")
+st.experimental_rerun()
+
+
+with get_engine().begin() as conn:
+notes_df = pd.read_sql(text("SELECT ts, body, next_followup FROM notes WHERE contact_id=:id ORDER BY ts DESC"), conn, params={"id": int(row['id'])})
+st.dataframe(notes_df, use_container_width=True)
+
+
+
+
+# ------------- App -------------
+
+
+def main():
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+st.title(APP_TITLE)
+st.caption("Upload leads → categorize → work the pipeline → export.")
