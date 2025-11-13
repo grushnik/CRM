@@ -9,7 +9,7 @@ from typing import List, Any, Optional
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
-from twilio.rest import Client
+import requests
 
 # -------------------------------------------------------------
 # BASIC CONFIG
@@ -46,46 +46,47 @@ PIPELINE = [
 ]
 
 # -------------------------------------------------------------
-# SMS OTP (2-FACTOR) VIA TWILIO
+# TELEGRAM OTP (2-FACTOR)
 # -------------------------------------------------------------
-def _send_sms_otp(code: str):
-    """Send OTP via Twilio to MFA_PHONE_TO.
-
-    Secrets required:
-      TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, MFA_PHONE_TO
+def _send_telegram_otp(code: str):
     """
-    sid = st.secrets.get("TWILIO_ACCOUNT_SID")
-    token = st.secrets.get("TWILIO_AUTH_TOKEN")
-    from_number = st.secrets.get("TWILIO_FROM")
-    to_number = st.secrets.get("MFA_PHONE_TO")
+    Send OTP to Telegram using Bot API.
 
-    if not (sid and token and from_number and to_number):
-        # Dev fallback so you're never locked out
+    Requires secrets:
+      TELEGRAM_BOT_TOKEN
+      TELEGRAM_CHAT_ID
+    """
+    token = st.secrets.get("TELEGRAM_BOT_TOKEN")
+    chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
+
+    if not (token and chat_id):
+        # Never lock you out: show the code if secrets missing
         st.sidebar.warning(
-            f"⚠️ Twilio secrets not configured. Use this one-time code: **{code}**"
+            f"⚠️ Telegram secrets not configured. Use this one-time code: **{code}**"
         )
         return
 
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    text = f"Radom CRM login code: {code} (valid {OTP_TTL_SECONDS//60} min)"
     try:
-        client = Client(sid, token)
-        client.messages.create(
-            to=to_number,
-            from_=from_number,
-            body=f"Radom CRM login code: {code} (valid {OTP_TTL_SECONDS//60} min)",
-        )
-        # Also show backup code (you can remove this when you fully trust SMS)
-        st.sidebar.success(
-            f"✅ SMS with code sent to {to_number}. Backup code: **{code}**"
-        )
+        resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+        if resp.status_code == 200:
+            # also show backup for convenience (you can remove later)
+            st.sidebar.success(
+                f"✅ Code sent to Telegram chat {chat_id}. Backup code: **{code}**"
+            )
+        else:
+            st.sidebar.error(f"Telegram error {resp.status_code}: {resp.text}")
+            st.sidebar.info(f"Use this one-time code instead: **{code}**")
     except Exception as e:
-        st.sidebar.error(f"Could not send SMS: {e}")
+        st.sidebar.error(f"Could not send Telegram message: {e}")
         st.sidebar.info(f"Use this one-time code instead: **{code}**")
 
 
-def check_login_two_factor_sms():
+def check_login_two_factor_telegram():
     """
     Step 1: password (CatJorge or APP_PASSWORD secret)
-    Step 2: 6-digit code sent via SMS (also shown as backup).
+    Step 2: 6-digit code sent to Telegram (also shown as backup).
     """
     expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
 
@@ -108,7 +109,7 @@ def check_login_two_factor_sms():
                 code = f"{random.randint(0, 999999):06d}"
                 ss["otp_code"] = code
                 ss["otp_time"] = int(time.time())
-                _send_sms_otp(code)
+                _send_telegram_otp(code)
                 st.rerun()
             else:
                 st.sidebar.error("Wrong password")
@@ -428,11 +429,9 @@ def sidebar_import_export(conn: sqlite3.Connection):
         n = upsert_contacts(conn, df)
         st.sidebar.success(f"Imported/updated {n} contacts")
 
-    # total count
     total = pd.read_sql_query("SELECT COUNT(*) n FROM contacts", conn).iloc[0]["n"]
     st.sidebar.caption(f"Total contacts: **{total}**")
 
-    # Export current filtered view (if available)
     export_df = st.session_state.get("export_df")
     if isinstance(export_df, pd.DataFrame) and not export_df.empty:
         csv_bytes = export_df.to_csv(index=False).encode("utf-8")
@@ -485,8 +484,6 @@ def save_photo(contact_id: int, uploaded_file) -> str:
 
 
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
-    from datetime import date  # ensure date is available here too
-
     st.markdown("---")
     st.markdown(
         f"### ✏️ Edit: {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
@@ -642,7 +639,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 # -------------------------------------------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    check_login_two_factor_sms()
+    check_login_two_factor_telegram()
 
     st.title(APP_TITLE)
     st.caption("Upload leads → categorize → work the pipeline → export.")
@@ -682,7 +679,6 @@ def main():
     st.subheader("Contacts")
     st.dataframe(df[available_cols], use_container_width=True, hide_index=True)
 
-    # selection list
     options = [
         (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
         for r in df[["id", "first_name", "last_name", "company"]].itertuples(
