@@ -14,7 +14,7 @@ import streamlit as st
 from dateutil import parser as dtparser
 
 # -------------------------------------------------------------
-# CONFIG
+# BASIC CONFIG
 # -------------------------------------------------------------
 APP_TITLE = "Radom CRM"
 DB_FILE = "data/radom_crm.db"
@@ -48,10 +48,10 @@ PIPELINE = [
 ]
 
 # -------------------------------------------------------------
-# EMAIL OTP HELPER
+# EMAIL OTP (2-FACTOR)
 # -------------------------------------------------------------
 def _send_email_otp(code: str):
-    """Send OTP code to configured MFA_EMAIL_TO via SMTP.
+    """Send OTP code to the configured MFA_EMAIL_TO address via SMTP.
 
     Uses Streamlit secrets:
       SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MFA_EMAIL_TO
@@ -62,9 +62,11 @@ def _send_email_otp(code: str):
     pwd = st.secrets.get("SMTP_PASS")
     to_addr = st.secrets.get("MFA_EMAIL_TO")
 
+    # If secrets are missing, don't even try SMTP – just show the code.
     if not (host and port and user and pwd and to_addr):
-        # Dev fallback so you don't lock yourself out
-        st.warning(f"⚠️ Email secrets not set; DEV OTP code is: **{code}**")
+        st.sidebar.warning(
+            f"⚠️ Email settings not configured. Use this one-time code: **{code}**"
+        )
         return
 
     msg = EmailMessage()
@@ -82,14 +84,22 @@ This code is valid for {OTP_TTL_SECONDS//60} minutes."""
             server.starttls()
             server.login(user, pwd)
             server.send_message(msg)
+
+        # Even when email works, show the code as backup (you can remove this later).
+        st.sidebar.success(
+            f"✅ Code sent to {to_addr}. Backup code (dev only): **{code}**"
+        )
+
     except Exception as e:
-        st.warning(f"Could not send OTP email: {e}")
+        # If Gmail rejects the login or anything else fails, you still get the code.
+        st.sidebar.error(f"Could not send OTP email: {e}")
+        st.sidebar.info(f"Use this one-time code instead: **{code}**")
 
 
 def check_login_two_factor_email():
     """
     Step 1: password (CatJorge or APP_PASSWORD secret)
-    Step 2: 6-digit code sent to MFA_EMAIL_TO.
+    Step 2: 6-digit code sent to MFA_EMAIL_TO (also shown in sidebar).
     """
     expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
 
@@ -98,7 +108,7 @@ def check_login_two_factor_email():
     ss.setdefault("authed", False)
 
     if ss["authed"]:
-        return  # already logged in
+        return  # already logged in in this session
 
     st.sidebar.header("🔐 Login")
 
@@ -113,9 +123,6 @@ def check_login_two_factor_email():
                 ss["otp_code"] = code
                 ss["otp_time"] = int(time.time())
                 _send_email_otp(code)
-                st.sidebar.success(
-                    "Password OK — a 6-digit code was sent to your email."
-                )
                 st.rerun()
             else:
                 st.sidebar.error("Wrong password")
