@@ -2,6 +2,10 @@ import os
 import io
 import re
 import sqlite3
+import random
+import time
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, date
 from typing import List, Any, Optional
 
@@ -9,35 +13,145 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 
+# -------------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------------
 APP_TITLE = "Radom CRM"
 DB_FILE = "data/radom_crm.db"
 
-# =========================== AUTH ===========================
 DEFAULT_PASSWORD = "CatJorge"
+OTP_TTL_SECONDS = 300  # 5 minutes
 
-def check_login():
-    """Simple password gate. Uses Streamlit secret if set, else DEFAULT_PASSWORD."""
+APPLICATIONS = [
+    "PFAS destruction",
+    "CO2 conversion",
+    "Waste-to-Energy",
+    "NOx production",
+    "Hydrogen production",
+    "Carbon black production",
+    "Mining waste",
+]
+
+PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
+
+PIPELINE = [
+    "New",
+    "Contacted",
+    "Meeting",
+    "Quoted",
+    "Won",
+    "Lost",
+    "Nurture",
+    "Pending",
+    "On hold",
+    "Irrelevant",
+]
+
+# -------------------------------------------------------------
+# EMAIL OTP HELPER
+# -------------------------------------------------------------
+def _send_email_otp(code: str):
+    """Send OTP code to configured MFA_EMAIL_TO via SMTP.
+
+    Uses Streamlit secrets:
+      SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MFA_EMAIL_TO
+    """
+    host = st.secrets.get("SMTP_HOST")
+    port = int(st.secrets.get("SMTP_PORT", "587"))
+    user = st.secrets.get("SMTP_USER")
+    pwd = st.secrets.get("SMTP_PASS")
+    to_addr = st.secrets.get("MFA_EMAIL_TO")
+
+    if not (host and port and user and pwd and to_addr):
+        # Dev fallback so you don't lock yourself out
+        st.warning(f"⚠️ Email secrets not set; DEV OTP code is: **{code}**")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = "Radom CRM login code"
+    msg["From"] = user
+    msg["To"] = to_addr
+    msg.set_content(
+        f"""Your Radom CRM login code is: {code}
+
+This code is valid for {OTP_TTL_SECONDS//60} minutes."""
+    )
+
+    try:
+        with smtplib.SMTP(host, port) as server:
+            server.starttls()
+            server.login(user, pwd)
+            server.send_message(msg)
+    except Exception as e:
+        st.warning(f"Could not send OTP email: {e}")
+
+
+def check_login_two_factor_email():
+    """
+    Step 1: password (CatJorge or APP_PASSWORD secret)
+    Step 2: 6-digit code sent to MFA_EMAIL_TO.
+    """
     expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
-    if "authed" not in st.session_state:
-        st.session_state.authed = False
-    if not st.session_state.authed:
-        st.sidebar.header("🔐 Login")
+
+    ss = st.session_state
+    ss.setdefault("auth_pw_ok", False)
+    ss.setdefault("authed", False)
+
+    if ss["authed"]:
+        return  # already logged in
+
+    st.sidebar.header("🔐 Login")
+
+    # ---- STEP 1: password ----
+    if not ss["auth_pw_ok"]:
         pwd = st.sidebar.text_input("Password", type="password")
-        if st.sidebar.button("Enter"):
+        if st.sidebar.button("Continue"):
             if pwd == expected:
-                st.session_state.authed = True
-                st.rerun()  # <- modern Streamlit rerun
+                ss["auth_pw_ok"] = True
+                # generate and send OTP
+                code = f"{random.randint(0, 999999):06d}"
+                ss["otp_code"] = code
+                ss["otp_time"] = int(time.time())
+                _send_email_otp(code)
+                st.sidebar.success(
+                    "Password OK — a 6-digit code was sent to your email."
+                )
+                st.rerun()
             else:
                 st.sidebar.error("Wrong password")
         st.stop()
 
-# =========================== DB HELPERS ===========================
+    # ---- STEP 2: OTP ----
+    if "otp_time" in ss and int(time.time()) - ss["otp_time"] > OTP_TTL_SECONDS:
+        for k in ("auth_pw_ok", "otp_code", "otp_time"):
+            ss.pop(k, None)
+        st.sidebar.error("Code expired. Please start over.")
+        st.stop()
+
+    code_in = st.sidebar.text_input("Enter 6-digit code", max_chars=6)
+    if st.sidebar.button("Verify"):
+        if code_in.strip() == ss.get("otp_code", ""):
+            ss["authed"] = True
+            for k in ("auth_pw_ok", "otp_code", "otp_time"):
+                ss.pop(k, None)
+            st.rerun()
+        else:
+            st.sidebar.error("Incorrect code")
+            st.stop()
+
+    st.stop()
+
+
+# -------------------------------------------------------------
+# DB HELPERS
+# -------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
     os.makedirs("data/images", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
+
 
 def init_db(conn: sqlite3.Connection):
     conn.executescript(
@@ -89,7 +203,10 @@ def init_db(conn: sqlite3.Connection):
     )
     conn.commit()
 
-# =========================== IMPORT / NORMALIZE ===========================
+
+# -------------------------------------------------------------
+# IMPORT / NORMALIZATION
+# -------------------------------------------------------------
 COLMAP = {
     "scan date/time": "scan_datetime",
     "first name": "first_name",
@@ -114,30 +231,45 @@ COLMAP = {
 }
 
 EXPECTED = [
-    "scan_datetime","first_name","last_name","job_title","company","street","street2",
-    "zip_code","city","state","country","phone","email","website","notes",
-    "gender","application","product_interest"
+    "scan_datetime",
+    "first_name",
+    "last_name",
+    "job_title",
+    "company",
+    "street",
+    "street2",
+    "zip_code",
+    "city",
+    "state",
+    "country",
+    "phone",
+    "email",
+    "website",
+    "notes",
+    "gender",
+    "application",
+    "product_interest",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
-PROF_PAT    = re.compile(r"\b(assistant|associate|full)?\s*professor\b|department chair", re.I)
-IND_PAT     = re.compile(r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b", re.I)
+PROF_PAT = re.compile(r"\b(assistant|associate|full)?\s*professor\b|department chair", re.I)
+IND_PAT = re.compile(
+    r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b",
+    re.I,
+)
 
-APPLICATIONS = [
-    "PFAS destruction", "CO2 conversion", "Waste-to-Energy", "NOx production",
-    "Hydrogen production", "Carbon black production", "Mining waste"
-]
-PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
-
-PIPELINE = ["New", "Contacted", "Meeting", "Quoted", "Won", "Lost", "Nurture", "Pending", "On hold", "Irrelevant"]
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    new_cols = {c: COLMAP.get(c.strip().lower(), c.strip().lower()) for c in df.columns}
+    new_cols = {
+        c: COLMAP.get(c.strip().lower(), c.strip().lower())
+        for c in df.columns
+    }
     df = df.rename(columns=new_cols)
     for c in EXPECTED:
         if c not in df.columns:
             df[c] = None
     return df
+
 
 def infer_category(row: pd.Series) -> str:
     title = (row.get("job_title") or "")
@@ -153,6 +285,7 @@ def infer_category(row: pd.Series) -> str:
         return "Industry"
     return "Other"
 
+
 def parse_dt(v) -> Optional[str]:
     if v is None or str(v).strip() == "" or pd.isna(v):
         return None
@@ -160,6 +293,7 @@ def parse_dt(v) -> Optional[str]:
         return dtparser.parse(str(v)).isoformat()
     except Exception:
         return str(v)
+
 
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     df = normalize_columns(df).fillna("")
@@ -170,7 +304,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     cur = conn.cursor()
     for _, r in df.iterrows():
         email = r["email"].strip().lower() or None
-        # Key by email, else by (first,last,company)
+
         if email:
             cur.execute("SELECT id FROM contacts WHERE email=?", (email,))
             row = cur.fetchone()
@@ -182,17 +316,31 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             row = cur.fetchone()
 
         payload = (
-            r["scan_datetime"], r["first_name"], r["last_name"], r["job_title"], r["company"],
-            r["street"], r["street2"], r["zip_code"], r["city"], r["state"], r["country"],
-            str(r["phone"]) if r["phone"] != "" else None, email,
-            r["website"], r["category"], r.get("gender") or None,
-            r.get("application") or None, r.get("product_interest") or None
+            r["scan_datetime"],
+            r["first_name"],
+            r["last_name"],
+            r["job_title"],
+            r["company"],
+            r["street"],
+            r["street2"],
+            r["zip_code"],
+            r["city"],
+            r["state"],
+            r["country"],
+            str(r["phone"]) if r["phone"] != "" else None,
+            email,
+            r["website"],
+            r["category"],
+            r.get("gender") or None,
+            r.get("application") or None,
+            r.get("product_interest") or None,
         )
 
         if row:
             cur.execute(
                 """
-                UPDATE contacts SET scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
+                UPDATE contacts SET
+                    scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
                     street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
                     category=?, gender=?, application=?, product_interest=?
                 WHERE id=?
@@ -205,7 +353,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 INSERT INTO contacts
                 (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
                  city, state, country, phone, email, website, category, gender, application, product_interest)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 payload,
             )
@@ -214,25 +362,56 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     conn.commit()
     return n
 
-# =========================== QUERIES ===========================
-def query_contacts(conn: sqlite3.Connection, q: str, cats: List[str], stats: List[str], state_like: str) -> pd.DataFrame:
-    sql = "SELECT *, (SELECT MAX(ts) FROM notes n WHERE n.contact_id=c.id) AS last_note_ts FROM contacts c WHERE 1=1"
+
+# -------------------------------------------------------------
+# QUERIES
+# -------------------------------------------------------------
+def query_contacts(
+    conn: sqlite3.Connection,
+    q: str,
+    cats: List[str],
+    stats: List[str],
+    state_like: str,
+    app_filter: List[str],
+    prod_filter: List[str],
+) -> pd.DataFrame:
+    sql = """
+        SELECT *,
+               (SELECT MAX(ts) FROM notes n WHERE n.contact_id = c.id) AS last_note_ts
+        FROM contacts c
+        WHERE 1=1
+    """
     params: List[Any] = []
+
     if q:
         like = f"%{q}%"
         sql += " AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR company LIKE ?)"
         params += [like, like, like, like]
+
     if cats:
         sql += " AND category IN (" + ",".join("?" for _ in cats) + ")"
         params += cats
+
     if stats:
         sql += " AND status IN (" + ",".join("?" for _ in stats) + ")"
         params += stats
+
     if state_like:
         sql += " AND state LIKE ?"
         params.append(f"%{state_like}%")
-    df = pd.read_sql_query(sql, conn, params=params)
-    return df
+
+    if app_filter:
+        sql += " AND application IN (" + ",".join("?" for _ in app_filter) + ")"
+        params += app_filter
+
+    if prod_filter:
+        sql += (
+            " AND product_interest IN (" + ",".join("?" for _ in prod_filter) + ")"
+        )
+        params += prod_filter
+
+    return pd.read_sql_query(sql, conn, params=params)
+
 
 def get_notes(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
     return pd.read_sql_query(
@@ -241,91 +420,43 @@ def get_notes(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
         params=(contact_id,),
     )
 
-# =========================== SIDEBAR I/O ===========================
+
+# -------------------------------------------------------------
+# SIDEBAR IMPORT / EXPORT
+# -------------------------------------------------------------
 def sidebar_import_export(conn: sqlite3.Connection):
     st.sidebar.header("Import / Export")
 
-    # Contacts import
-    up = st.sidebar.file_uploader("Upload Excel/CSV (Contacts)", type=["xlsx", "xls", "csv"])
+    up = st.sidebar.file_uploader(
+        "Upload Excel/CSV (Contacts)", type=["xlsx", "xls", "csv"]
+    )
     if up is not None:
         df = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
         n = upsert_contacts(conn, df)
         st.sidebar.success(f"Imported/updated {n} contacts")
 
-    # Notes bulk import
-    st.sidebar.markdown("**Bulk import notes (by email)**")
-    upn = st.sidebar.file_uploader("Upload Excel/CSV (Notes)", type=["xlsx", "xls", "csv"], key="notesu")
-    if upn is not None:
-        notes_df = pd.read_csv(upn) if upn.name.lower().endswith(".csv") else pd.read_excel(upn)
-        # expect: email, body, (optional) ts, (optional) next_followup
-        cols_lower = [c.strip().lower() for c in notes_df.columns]
-        notes_df.columns = cols_lower
-        if not {"email", "body"}.issubset(set(cols_lower)):
-            st.sidebar.error("Notes file must have columns: email, body (ts and next_followup optional)")
-        else:
-            cur = conn.cursor()
-            added = 0
-            for _, r in notes_df.iterrows():
-                email = (str(r.get("email") or "")).strip().lower()
-                body = (str(r.get("body") or "")).strip()
-                if not email or not body:
-                    continue
-                cur.execute("SELECT id FROM contacts WHERE email=?", (email,))
-                row = cur.fetchone()
-                if not row:
-                    continue
-                # timestamps
-                raw_ts = r.get("ts")
-                raw_fu = r.get("next_followup")
-                if raw_ts is not None and str(raw_ts).strip() != "":
-                    try:
-                        ts_iso = dtparser.parse(str(raw_ts)).isoformat()
-                    except Exception:
-                        ts_iso = datetime.utcnow().isoformat()
-                else:
-                    ts_iso = datetime.utcnow().isoformat()
-
-                fu_iso = None
-                if raw_fu is not None and str(raw_fu).strip() != "":
-                    try:
-                        fu_iso = dtparser.parse(str(raw_fu)).date().isoformat()
-                    except Exception:
-                        fu_iso = None
-
-                cur.execute(
-                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (int(row[0]), ts_iso, body, fu_iso),
-                )
-                cur.execute("UPDATE contacts SET last_touch=? WHERE id=?", (ts_iso, int(row[0])))
-                added += 1
-            conn.commit()
-            st.sidebar.success(f"Imported {added} notes")
-
-    # Totals
+    # total count
     total = pd.read_sql_query("SELECT COUNT(*) n FROM contacts", conn).iloc[0]["n"]
     st.sidebar.caption(f"Total contacts: **{total}**")
 
-    # Export filtered contacts + notes as Excel/CSV
+    # Export current filtered view (if available)
     export_df = st.session_state.get("export_df")
-    notes_export = st.session_state.get("notes_export")
-
     if isinstance(export_df, pd.DataFrame) and not export_df.empty:
-        # CSV
         csv_bytes = export_df.to_csv(index=False).encode("utf-8")
-        st.sidebar.download_button("Download Contacts CSV (filtered)", csv_bytes, file_name="radom-contacts.csv")
-        # XLSX (Contacts + Notes sheets)
-        xls_buf = io.BytesIO()
-        with pd.ExcelWriter(xls_buf, engine="openpyxl") as wr:
-            export_df.to_excel(wr, index=False, sheet_name="Contacts")
-            if isinstance(notes_export, pd.DataFrame) and not notes_export.empty:
-                notes_export.to_excel(wr, index=False, sheet_name="Notes")
-        st.sidebar.download_button("Download Excel (Contacts + Notes)", xls_buf.getvalue(),
-                                   file_name="radom-crm-export.xlsx")
+        st.sidebar.download_button(
+            "Download Contacts CSV (filtered)",
+            csv_bytes,
+            file_name="radom-contacts.csv",
+        )
 
-# =========================== FILTERS ===========================
+
+# -------------------------------------------------------------
+# FILTERS UI
+# -------------------------------------------------------------
 def filters_ui():
     st.subheader("Filters")
     q = st.text_input("Search (name, email, company)", "")
+
     c1, c2, c3 = st.columns(3)
     with c1:
         cats = st.multiselect(
@@ -337,9 +468,19 @@ def filters_ui():
         stats = st.multiselect("Status", PIPELINE, [])
     with c3:
         st_like = st.text_input("State/Province contains", "")
-    return q, cats, stats, st_like
 
-# =========================== PHOTOS ===========================
+    c4, c5 = st.columns(2)
+    with c4:
+        app_filter = st.multiselect("Application", APPLICATIONS, [])
+    with c5:
+        prod_filter = st.multiselect("Product type interest", PRODUCTS, [])
+
+    return q, cats, stats, st_like, app_filter, prod_filter
+
+
+# -------------------------------------------------------------
+# PHOTO + NOTES + EDITOR
+# -------------------------------------------------------------
 def save_photo(contact_id: int, uploaded_file) -> str:
     ext = os.path.splitext(uploaded_file.name)[1].lower()
     if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
@@ -349,49 +490,68 @@ def save_photo(contact_id: int, uploaded_file) -> str:
         f.write(uploaded_file.getbuffer())
     return path
 
-# =========================== EDITOR ===========================
+
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
-    st.markdown(f"### ✏️ Edit: {row['first_name']} {row['last_name']} — {row.get('company') or ''}")
+    st.markdown(
+        f"### ✏️ Edit: {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
+    )
 
     with st.form(f"edit_{int(row['id'])}"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            first  = st.text_input("First name", row["first_name"] or "")
-            job    = st.text_input("Job title", row["job_title"] or "")
-            phone  = st.text_input("Phone", row["phone"] or "")
-            gender = st.selectbox("Gender", ["", "Female", "Male", "Other"],
-                                  index=["", "Female", "Male", "Other"].index(row["gender"] or ""))
+            first = st.text_input("First name", row["first_name"] or "")
+            job = st.text_input("Job title", row["job_title"] or "")
+            phone = st.text_input("Phone", row["phone"] or "")
+            gender = st.selectbox(
+                "Gender",
+                ["", "Female", "Male", "Other"],
+                index=["", "Female", "Male", "Other"].index(row["gender"] or ""),
+            )
         with col2:
-            last   = st.text_input("Last name", row["last_name"] or "")
-            company= st.text_input("Company", row["company"] or "")
-            email  = st.text_input("Email", row["email"] or "")
+            last = st.text_input("Last name", row["last_name"] or "")
+            company = st.text_input("Company", row["company"] or "")
+            email = st.text_input("Email", row["email"] or "")
             application = st.selectbox(
-                "Application", [""] + APPLICATIONS,
-                index=([""] + APPLICATIONS).index(row["application"] or "")
+                "Application",
+                [""] + APPLICATIONS,
+                index=([""] + APPLICATIONS).index(row["application"] or ""),
             )
         with col3:
-            cat_opts = ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"]
+            cat_opts = [
+                "PhD/Student",
+                "Professor/Academic",
+                "Academic",
+                "Industry",
+                "Other",
+            ]
             category = st.selectbox(
-                "Category", cat_opts,
-                index=cat_opts.index(row["category"]) if row["category"] in cat_opts else 0
+                "Category",
+                cat_opts,
+                index=cat_opts.index(row["category"])
+                if row["category"] in cat_opts
+                else 0,
             )
             status = st.selectbox(
-                "Status", PIPELINE,
-                index=PIPELINE.index(row["status"]) if row["status"] in PIPELINE else 0
+                "Status",
+                PIPELINE,
+                index=PIPELINE.index(row["status"])
+                if row["status"] in PIPELINE
+                else 0,
             )
             owner = st.text_input("Owner", row["owner"] or "")
             product = st.selectbox(
-                "Product type interest", [""] + PRODUCTS,
-                index=([""] + PRODUCTS).index(row["product_interest"] or "")
+                "Product type interest",
+                [""] + PRODUCTS,
+                index=([""] + PRODUCTS).index(row["product_interest"] or ""),
             )
 
         st.write("**Address**")
-        street  = st.text_input("Street", row["street"] or "")
+        street = st.text_input("Street", row["street"] or "")
         street2 = st.text_input("Street 2", row["street2"] or "")
-        city    = st.text_input("City", row["city"] or "")
-        state   = st.text_input("State/Province", row["state"] or "")
-        zipc    = st.text_input("ZIP", row["zip_code"] or "")
+        city = st.text_input("City", row["city"] or "")
+        state = st.text_input("State/Province", row["state"] or "")
+        zipc = st.text_input("ZIP", row["zip_code"] or "")
         country = st.text_input("Country", row["country"] or "")
         website = st.text_input("Website", row["website"] or "")
 
@@ -405,16 +565,33 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 )
             cur.execute(
                 """
-                UPDATE contacts SET first_name=?, last_name=?, job_title=?, company=?, phone=?, email=?,
-                    category=?, status=?, owner=?, street=?, street2=?, city=?, state=?, zip_code=?, country=?,
-                    website=?, last_touch=?, gender=?, application=?, product_interest=?
+                UPDATE contacts SET
+                    first_name=?, last_name=?, job_title=?, company=?, phone=?, email=?,
+                    category=?, status=?, owner=?, street=?, street2=?, city=?, state=?,
+                    zip_code=?, country=?, website=?, last_touch=?, gender=?, application=?, product_interest=?
                 WHERE id=?
                 """,
                 (
-                    first, last, job, company, phone or None, (email or "").lower().strip() or None,
-                    category, status, owner or None, street or None, street2 or None, city or None,
-                    state or None, zipc or None, country or None, website or None,
-                    datetime.utcnow().isoformat(), gender or None, application or None, product or None,
+                    first,
+                    last,
+                    job,
+                    company,
+                    phone or None,
+                    (email or "").lower().strip() or None,
+                    category,
+                    status,
+                    owner or None,
+                    street or None,
+                    street2 or None,
+                    city or None,
+                    state or None,
+                    zipc or None,
+                    country or None,
+                    website or None,
+                    datetime.utcnow().isoformat(),
+                    gender or None,
+                    application or None,
+                    product or None,
                     int(row["id"]),
                 ),
             )
@@ -422,15 +599,21 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.success("Saved")
             st.rerun()
 
-    # Photo section
+    # Photo
     with st.expander("📷 Photo"):
         ph_path = row.get("photo")
         if ph_path and os.path.exists(ph_path):
             st.image(ph_path, width=160)
-        up = st.file_uploader("Upload/replace photo", type=["png", "jpg", "jpeg", "webp"], key=f"photo_{row['id']}")
+        up = st.file_uploader(
+            "Upload/replace photo",
+            type=["png", "jpg", "jpeg", "webp"],
+            key=f"photo_{row['id']}",
+        )
         if up is not None:
             saved_path = save_photo(int(row["id"]), up)
-            conn.execute("UPDATE contacts SET photo=? WHERE id=?", (saved_path, int(row["id"])))
+            conn.execute(
+                "UPDATE contacts SET photo=? WHERE id=?", (saved_path, int(row["id"]))
+            )
             conn.commit()
             st.success("Photo saved")
             st.rerun()
@@ -438,7 +621,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     # Notes
     st.markdown("#### 🗒️ Notes")
     new_note = st.text_area("Add a note", placeholder="Called; left voicemail…")
-    next_fu  = st.date_input("Next follow-up", value=None)
+    next_fu = st.date_input("Next follow-up", value=None)
     if st.button("Add note", key=f"addnote_{int(row['id'])}"):
         if new_note.strip():
             ts_iso = datetime.utcnow().isoformat()
@@ -447,7 +630,10 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
                 (int(row["id"]), ts_iso, new_note.strip(), fu_iso),
             )
-            conn.execute("UPDATE contacts SET last_touch=? WHERE id=?", (ts_iso, int(row["id"])))
+            conn.execute(
+                "UPDATE contacts SET last_touch=? WHERE id=?",
+                (ts_iso, int(row["id"])),
+            )
             conn.commit()
             st.success("Note added")
             st.rerun()
@@ -455,51 +641,69 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     notes_df = get_notes(conn, int(row["id"]))
     st.dataframe(notes_df, use_container_width=True)
 
-# =========================== MAIN APP ===========================
+
+# -------------------------------------------------------------
+# MAIN APP
+# -------------------------------------------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    check_login()
+    check_login_two_factor_email()
 
     st.title(APP_TITLE)
     st.caption("Upload leads → categorize → work the pipeline → export.")
 
     conn = get_conn()
     init_db(conn)
-
     sidebar_import_export(conn)
 
-    q, cats, stats, st_like = filters_ui()
-    df = query_contacts(conn, q, cats, stats, st_like)
+    q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
+    df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
     if df.empty:
         st.info("No contacts yet — upload an Excel/CSV in the sidebar.")
         return
 
     export_cols = [
-        "first_name","last_name","email","phone","job_title","company","city","state","country",
-        "category","status","owner","gender","application","product_interest","last_touch"
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "job_title",
+        "company",
+        "city",
+        "state",
+        "country",
+        "category",
+        "status",
+        "owner",
+        "gender",
+        "application",
+        "product_interest",
+        "last_touch",
     ]
-    st.session_state["export_df"] = df[export_cols].copy()
-
-    # Build a notes export for current selection (all filtered rows)
-    notes_frames = []
-    for cid in df["id"].tolist():
-        ndf = get_notes(conn, int(cid))
-        if not ndf.empty:
-            ndf.insert(0, "contact_id", cid)
-            notes_frames.append(ndf)
-    st.session_state["notes_export"] = pd.concat(notes_frames, ignore_index=True) if notes_frames else pd.DataFrame()
+    available_cols = [c for c in export_cols if c in df.columns]
+    st.session_state["export_df"] = df[available_cols].copy()
 
     st.subheader("Contacts")
-    st.dataframe(df[export_cols], use_container_width=True, hide_index=True)
+    st.dataframe(df[available_cols], use_container_width=True, hide_index=True)
 
-    # Select contact
-    options = [(int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}") for r in df[["id","first_name","last_name","company"]].itertuples(index=False)]
-    chosen = st.selectbox("Select a contact to edit", options, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    # selection list
+    options = [
+        (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
+        for r in df[["id", "first_name", "last_name", "company"]].itertuples(
+            index=False
+        )
+    ]
+    chosen = st.selectbox(
+        "Select a contact to edit",
+        options,
+        format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+    )
     if chosen:
-        sel_id = int(chosen[0])
+        sel_id = chosen[0]
         row = df[df["id"] == sel_id].iloc[0]
         contact_editor(conn, row)
+
 
 if __name__ == "__main__":
     main()
