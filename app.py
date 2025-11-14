@@ -72,7 +72,6 @@ def _send_telegram_otp(code: str):
     try:
         resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
         if resp.status_code == 200:
-            # also show backup for convenience (you can remove later)
             st.sidebar.success(
                 f"✅ Code sent to Telegram chat {chat_id}. Backup code: **{code}**"
             )
@@ -327,11 +326,9 @@ def normalize_status(val: Any) -> Optional[str]:
     s = str(val).strip().lower()
     if not s:
         return None
-    # Exact matches to pipeline values (case-insensitive)
     for p in PIPELINE:
         if s == p.lower():
             return p
-    # Simple synonyms if you ever use them
     synonyms = {
         "new lead": "New",
         "contact": "Contacted",
@@ -432,7 +429,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 INSERT INTO contacts
                 (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
                  city, state, country, phone, email, website, category, status, gender, application, product_interest)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 payload_common
                 + (
@@ -447,7 +444,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         # If there is a notes column (comments/email responses), store as a note
         if note_text:
             ts_iso = r["scan_datetime"] or datetime.utcnow().isoformat()
-            # Avoid duplicating the same note if you re-import the same file
             cur.execute(
                 "SELECT 1 FROM notes WHERE contact_id=? AND body=?",
                 (contact_id, note_text),
@@ -829,7 +825,7 @@ def add_contact_form(conn: sqlite3.Connection):
                          street, street2, zip_code, city, state, country,
                          phone, email, website, category, status, owner, last_touch,
                          gender, application, product_interest)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             scan_dt,
@@ -932,7 +928,6 @@ def main():
             index=False
         )
     ]
-    # Map from id to label for format_func
     option_labels = {opt[0]: opt[1] for opt in options}
 
     chosen_id = st.selectbox(
