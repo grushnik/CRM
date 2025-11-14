@@ -251,6 +251,7 @@ COLMAP = {
     "status": "status",
     "pipeline": "status",
     "stage": "status",
+    "photo": "photo",
 }
 
 EXPECTED = [
@@ -273,6 +274,7 @@ EXPECTED = [
     "application",
     "product_interest",
     "status",
+    "photo",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
@@ -356,6 +358,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         email = r["email"].strip().lower() or None
         status_from_file = r.get("status_norm")
         note_text = (r.get("notes") or "").strip()
+        photo_path = (r.get("photo") or "").strip() or None
 
         # Look up existing contact
         if email:
@@ -410,7 +413,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 UPDATE contacts SET
                     scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
                     street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
-                    category=?, status=?, gender=?, application=?, product_interest=?
+                    category=?, status=?, gender=?, application=?, product_interest=?, photo=?
                 WHERE id=?
                 """,
                 payload_common
@@ -419,6 +422,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     gender,
                     application,
                     product_interest,
+                    photo_path,
                     existing_id,
                 ),
             )
@@ -428,8 +432,8 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 """
                 INSERT INTO contacts
                 (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
-                 city, state, country, phone, email, website, category, status, gender, application, product_interest)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 city, state, country, phone, email, website, category, status, gender, application, product_interest, photo)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 payload_common
                 + (
@@ -437,6 +441,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     gender,
                     application,
                     product_interest,
+                    photo_path,
                 ),
             )
             contact_id = cur.lastrowid
@@ -524,23 +529,22 @@ def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
     Aggregated notes per contact for export:
     one string per contact, all notes joined by ' || ' in time order.
     """
-    return pd.read_sql_query(
-        """
-        SELECT contact_id,
-               (
-                 SELECT GROUP_CONCAT(body, ' || ')
-                 FROM (
-                   SELECT body
-                   FROM notes n2
-                   WHERE n2.contact_id = n1.contact_id
-                   ORDER BY ts
-                 )
-               ) AS notes_concat
-        FROM notes n1
-        GROUP BY contact_id
-        """,
-        conn,
+    df = pd.read_sql_query(
+        "SELECT contact_id, ts, body FROM notes ORDER BY contact_id, ts", conn
     )
+    if df.empty:
+        return pd.DataFrame(columns=["contact_id", "notes"])
+
+    grouped = (
+        df.groupby("contact_id")["body"]
+        .apply(
+            lambda s: " || ".join(
+                [str(x).strip() for x in s if str(x).strip() != ""]
+            )
+        )
+        .reset_index(name="notes")
+    )
+    return grouped
 
 
 # -------------------------------------------------------------
@@ -884,9 +888,8 @@ def main():
     notes_agg = get_notes_agg(conn)
     if not notes_agg.empty:
         df = df.merge(notes_agg, how="left", left_on="id", right_on="contact_id")
-        df["notes"] = df["notes_concat"]
-        df = df.drop(columns=["contact_id", "notes_concat"], errors="ignore")
-    else:
+        df.drop(columns=["contact_id"], inplace=True, errors="ignore")
+    if "notes" not in df.columns:
         df["notes"] = None
 
     if df.empty:
@@ -913,7 +916,8 @@ def main():
         "application",
         "product_interest",
         "last_touch",
-        "notes",  # include notes in export
+        "notes",   # include notes in export
+        "photo",   # include photo path in export
     ]
     available_cols = [c for c in export_cols if c in df.columns]
     st.session_state["export_df"] = df[available_cols].copy()
