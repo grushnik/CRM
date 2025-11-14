@@ -16,6 +16,7 @@ import requests
 # -------------------------------------------------------------
 APP_TITLE = "Radom CRM"
 DB_FILE = "data/radom_crm.db"
+BACKUP_FILE = "data/contacts_backup.csv"
 
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
@@ -137,7 +138,7 @@ def check_login_two_factor_telegram():
 
 
 # -------------------------------------------------------------
-# DB HELPERS
+# DB + BACKUP HELPERS
 # -------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
@@ -198,6 +199,28 @@ def init_db(conn: sqlite3.Connection):
     conn.commit()
 
 
+def backup_contacts(conn: sqlite3.Connection):
+    """Write a CSV backup of all contacts to BACKUP_FILE."""
+    df = pd.read_sql_query("SELECT * FROM contacts", conn)
+    if not df.empty:
+        os.makedirs("data", exist_ok=True)
+        df.to_csv(BACKUP_FILE, index=False)
+
+
+def restore_from_backup_if_empty(conn: sqlite3.Connection):
+    """If DB has zero contacts but backup CSV exists, restore from it."""
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM contacts")
+    n = cur.fetchone()[0]
+    if n == 0 and os.path.exists(BACKUP_FILE):
+        try:
+            df = pd.read_csv(BACKUP_FILE)
+            if not df.empty:
+                upsert_contacts(conn, df)
+        except Exception as e:
+            print(f"Backup restore failed: {e}")
+
+
 # -------------------------------------------------------------
 # IMPORT / NORMALIZATION
 # -------------------------------------------------------------
@@ -217,11 +240,18 @@ COLMAP = {
     "phone": "phone",
     "email": "email",
     "notes": "notes",
+    "comment": "notes",
+    "comments": "notes",
+    "email comments": "notes",
+    "email responses": "notes",
     "website": "website",
     "gender": "gender",
     "application": "application",
     "product interest": "product_interest",
     "product_type_interest": "product_interest",
+    "status": "status",
+    "pipeline": "status",
+    "stage": "status",
 }
 
 EXPECTED = [
@@ -243,6 +273,7 @@ EXPECTED = [
     "gender",
     "application",
     "product_interest",
+    "status",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
@@ -289,27 +320,63 @@ def parse_dt(v) -> Optional[str]:
         return str(v)
 
 
+def normalize_status(val: Any) -> Optional[str]:
+    """Map free-text status to one of PIPELINE or None."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip().lower()
+    if not s:
+        return None
+    # Exact matches to pipeline values (case-insensitive)
+    for p in PIPELINE:
+        if s == p.lower():
+            return p
+    # Simple synonyms if you ever use them
+    synonyms = {
+        "new lead": "New",
+        "contact": "Contacted",
+        "meeting scheduled": "Meeting",
+        "quote": "Quoted",
+        "won deal": "Won",
+        "lost deal": "Lost",
+        "follow up": "Nurture",
+        "follow-up": "Nurture",
+    }
+    if s in synonyms:
+        return synonyms[s]
+    return None
+
+
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     df = normalize_columns(df).fillna("")
     df["category"] = df.apply(infer_category, axis=1)
     df["scan_datetime"] = df["scan_datetime"].apply(parse_dt)
+    df["status_norm"] = df.get("status", "").apply(normalize_status)
 
     n = 0
     cur = conn.cursor()
     for _, r in df.iterrows():
         email = r["email"].strip().lower() or None
+        status_from_file = r.get("status_norm")
+        note_text = (r.get("notes") or "").strip()
 
+        # Look up existing contact
         if email:
-            cur.execute("SELECT id FROM contacts WHERE email=?", (email,))
+            cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,))
             row = cur.fetchone()
         else:
             cur.execute(
-                "SELECT id FROM contacts WHERE first_name=? AND last_name=? AND company=?",
+                "SELECT id, status FROM contacts WHERE first_name=? AND last_name=? AND company=?",
                 (r["first_name"], r["last_name"], r["company"]),
             )
             row = cur.fetchone()
 
-        payload = (
+        existing_id = row[0] if row else None
+        existing_status = row[1] if row and len(row) > 1 else None
+
+        final_status = status_from_file or existing_status or "New"
+
+        payload_common = (
             r["scan_datetime"],
             r["first_name"],
             r["last_name"],
@@ -325,35 +392,76 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             email,
             r["website"],
             r["category"],
-            r.get("gender") or None,
-            r.get("application") or None,
-            r.get("product_interest") or None,
         )
 
-        if row:
+        gender = r.get("gender") or None
+        application = r.get("application") or None
+        product_interest = r.get("product_interest") or None
+
+        if existing_id:
+            # Log status history if changed by import
+            if existing_status != final_status:
+                cur.execute(
+                    """
+                    INSERT INTO status_history(contact_id, ts, old_status, new_status)
+                    VALUES (?,?,?,?)
+                    """,
+                    (existing_id, datetime.utcnow().isoformat(), existing_status, final_status),
+                )
             cur.execute(
                 """
                 UPDATE contacts SET
                     scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
                     street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
-                    category=?, gender=?, application=?, product_interest=?
+                    category=?, status=?, gender=?, application=?, product_interest=?
                 WHERE id=?
                 """,
-                payload + (row[0],),
+                payload_common
+                + (
+                    final_status,
+                    gender,
+                    application,
+                    product_interest,
+                    existing_id,
+                ),
             )
+            contact_id = existing_id
         else:
             cur.execute(
                 """
                 INSERT INTO contacts
                 (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
-                 city, state, country, phone, email, website, category, gender, application, product_interest)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 city, state, country, phone, email, website, category, status, gender, application, product_interest)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                payload,
+                payload_common
+                + (
+                    final_status,
+                    gender,
+                    application,
+                    product_interest,
+                ),
             )
+            contact_id = cur.lastrowid
+
+        # If there is a notes column (comments/email responses), store as a note
+        if note_text:
+            ts_iso = r["scan_datetime"] or datetime.utcnow().isoformat()
+            # Avoid duplicating the same note if you re-import the same file
+            cur.execute(
+                "SELECT 1 FROM notes WHERE contact_id=? AND body=?",
+                (contact_id, note_text),
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                    (contact_id, ts_iso, note_text, None),
+                )
+
         n += 1
 
     conn.commit()
+    backup_contacts(conn)
     return n
 
 
@@ -412,6 +520,30 @@ def get_notes(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
         "SELECT ts, body, next_followup FROM notes WHERE contact_id=? ORDER BY ts DESC",
         conn,
         params=(contact_id,),
+    )
+
+
+def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
+    """
+    Aggregated notes per contact for export:
+    one string per contact, all notes joined by ' || ' in time order.
+    """
+    return pd.read_sql_query(
+        """
+        SELECT contact_id,
+               (
+                 SELECT GROUP_CONCAT(body, ' || ')
+                 FROM (
+                   SELECT body
+                   FROM notes n2
+                   WHERE n2.contact_id = n1.contact_id
+                   ORDER BY ts
+                 )
+               ) AS notes_concat
+        FROM notes n1
+        GROUP BY contact_id
+        """,
+        conn,
     )
 
 
@@ -588,6 +720,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 ),
             )
             conn.commit()
+            backup_contacts(conn)
             st.success("Saved")
             st.rerun()
 
@@ -607,13 +740,14 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 "UPDATE contacts SET photo=? WHERE id=?", (saved_path, int(row["id"]))
             )
             conn.commit()
+            backup_contacts(conn)
             st.success("Photo saved")
             st.rerun()
 
     # Notes
     st.markdown("#### 🗒️ Notes")
     new_note = st.text_area("Add a note", placeholder="Called; left voicemail…")
-    next_fu = st.date_input("Next follow-up", value=None)
+    next_fu = st.date_input("Next follow-up", value=date.today())
     if st.button("Add note", key=f"addnote_{int(row['id'])}"):
         if new_note.strip():
             ts_iso = datetime.utcnow().isoformat()
@@ -627,11 +761,104 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 (ts_iso, int(row["id"])),
             )
             conn.commit()
+            backup_contacts(conn)
             st.success("Note added")
             st.rerun()
 
     notes_df = get_notes(conn, int(row["id"]))
     st.dataframe(notes_df, use_container_width=True)
+
+
+# -------------------------------------------------------------
+# MANUAL ADD CONTACT FORM
+# -------------------------------------------------------------
+def add_contact_form(conn: sqlite3.Connection):
+    st.markdown("### ➕ Add new contact manually")
+
+    with st.expander("Open form"):
+        with st.form("add_contact_form"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                first = st.text_input("First name")
+                job = st.text_input("Job title")
+                phone = st.text_input("Phone")
+                gender = st.selectbox("Gender", ["", "Female", "Male", "Other"])
+            with col2:
+                last = st.text_input("Last name")
+                company = st.text_input("Company")
+                email = st.text_input("Email")
+                application = st.selectbox("Application", [""] + APPLICATIONS)
+            with col3:
+                cat_opts = [
+                    "PhD/Student",
+                    "Professor/Academic",
+                    "Academic",
+                    "Industry",
+                    "Other",
+                ]
+                category = st.selectbox("Category", cat_opts, index=3)  # default Industry
+                status = st.selectbox("Status", PIPELINE, index=0)
+                owner = st.text_input("Owner")
+                product = st.selectbox("Product type interest", [""] + PRODUCTS)
+
+            st.write("**Address**")
+            street = st.text_input("Street")
+            street2 = st.text_input("Street 2")
+            city = st.text_input("City")
+            state = st.text_input("State/Province")
+            zipc = st.text_input("ZIP")
+            country = st.text_input("Country")
+            website = st.text_input("Website")
+
+            submitted = st.form_submit_button("Create contact")
+            if submitted:
+                # Basic validation: at least email or (first+last+company)
+                if not email and not (first and last and company):
+                    st.error(
+                        "Please provide either an email, or first name + last name + company."
+                    )
+                else:
+                    scan_dt = datetime.utcnow().isoformat()
+                    email_norm = (email or "").strip().lower() or None
+                    status_norm = normalize_status(status) or "New"
+
+                    conn.execute(
+                        """
+                        INSERT INTO contacts
+                        (scan_datetime, first_name, last_name, job_title, company,
+                         street, street2, zip_code, city, state, country,
+                         phone, email, website, category, status, owner, last_touch,
+                         gender, application, product_interest)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            scan_dt,
+                            first or None,
+                            last or None,
+                            job or None,
+                            company or None,
+                            street or None,
+                            street2 or None,
+                            zipc or None,
+                            city or None,
+                            state or None,
+                            country or None,
+                            phone or None,
+                            email_norm,
+                            website or None,
+                            category,
+                            status_norm,
+                            owner or None,
+                            scan_dt,
+                            gender or None,
+                            application or None,
+                            product or None,
+                        ),
+                    )
+                    conn.commit()
+                    backup_contacts(conn)
+                    st.success("New contact created")
+                    st.experimental_rerun()
 
 
 # -------------------------------------------------------------
@@ -646,13 +873,31 @@ def main():
 
     conn = get_conn()
     init_db(conn)
+    restore_from_backup_if_empty(conn)
+
     sidebar_import_export(conn)
 
+    # Manual add UI (works even if DB is empty)
+    add_contact_form(conn)
+
+    # Filters + contact table
     q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
     df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
+    # Attach aggregated notes for export / viewing
+    notes_agg = get_notes_agg(conn)
+    if not notes_agg.empty:
+        df = df.merge(notes_agg, how="left", left_on="id", right_on="contact_id")
+        df["notes"] = df["notes_concat"]
+        df = df.drop(columns=["contact_id", "notes_concat"], errors="ignore")
+    else:
+        df["notes"] = None
+
     if df.empty:
-        st.info("No contacts yet — upload an Excel/CSV in the sidebar.")
+        st.info(
+            "No contacts match your filters or the database is empty. "
+            "Add a contact with the form above or upload an Excel/CSV in the sidebar."
+        )
         return
 
     export_cols = [
@@ -672,6 +917,7 @@ def main():
         "application",
         "product_interest",
         "last_touch",
+        "notes",  # include notes in export
     ]
     available_cols = [c for c in export_cols if c in df.columns]
     st.session_state["export_df"] = df[available_cols].copy()
@@ -679,20 +925,24 @@ def main():
     st.subheader("Contacts")
     st.dataframe(df[available_cols], use_container_width=True, hide_index=True)
 
+    # Build selectbox options
     options = [
         (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
         for r in df[["id", "first_name", "last_name", "company"]].itertuples(
             index=False
         )
     ]
-    chosen = st.selectbox(
+    # Map from id to label for format_func
+    option_labels = {opt[0]: opt[1] for opt in options}
+
+    chosen_id = st.selectbox(
         "Select a contact to edit",
-        options,
-        format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+        [opt[0] for opt in options],
+        format_func=lambda x: option_labels.get(x, str(x)),
     )
-    if chosen:
-        sel_id = chosen[0]
-        row = df[df["id"] == sel_id].iloc[0]
+
+    if chosen_id:
+        row = df[df["id"] == chosen_id].iloc[0]
         contact_editor(conn, row)
 
 
