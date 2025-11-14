@@ -346,6 +346,39 @@ def normalize_status(val: Any) -> Optional[str]:
     return None
 
 
+def normalize_application(val: Any) -> Optional[str]:
+    """Map free-text application to one of APPLICATIONS or None."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip().lower()
+    if not s:
+        return None
+
+    # Exact matches
+    for app in APPLICATIONS:
+        if s == app.lower():
+            return app
+
+    # Keyword-based mapping
+    if "pfas" in s:
+        return "PFAS destruction"
+    if "co2" in s or "carbon dioxide" in s:
+        return "CO2 conversion"
+    if "waste" in s or "gasification" in s or "rdf" in s:
+        return "Waste-to-Energy"
+    if "nox" in s or "nitric" in s or "nitrate" in s or "nitrification" in s:
+        return "NOx production"
+    if "hydrogen" in s or "h2" in s:
+        return "Hydrogen production"
+    if "carbon black" in s or "soot" in s:
+        return "Carbon black production"
+    if "mining" in s or "tailings" in s:
+        return "Mining waste"
+
+    # If nothing matches, we drop it (no canonical application)
+    return None
+
+
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     df = normalize_columns(df).fillna("")
     df["category"] = df.apply(infer_category, axis=1)
@@ -395,7 +428,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         )
 
         gender = r.get("gender") or None
-        application = r.get("application") or None
+        application = normalize_application(r.get("application"))
         product_interest = r.get("product_interest") or None
 
         if existing_id:
@@ -617,9 +650,21 @@ def save_photo(contact_id: int, uploaded_file) -> str:
 
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
-    st.markdown(
-        f"### ✏️ Edit: {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
-    )
+
+    # Header with photo next to name
+    col_img, col_txt = st.columns([1, 4])
+    with col_img:
+        ph_path = row.get("photo")
+        if ph_path and os.path.exists(ph_path):
+            st.image(ph_path, width=120)
+        else:
+            st.caption("No photo")
+
+    with col_txt:
+        st.markdown(
+            f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
+        )
+        st.caption(f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}")
 
     with st.form(f"edit_{int(row['id'])}"):
         col1, col2, col3 = st.columns(3)
@@ -636,10 +681,16 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             last = st.text_input("Last name", row["last_name"] or "")
             company = st.text_input("Company", row["company"] or "")
             email = st.text_input("Email", row["email"] or "")
+            app_options = [""] + APPLICATIONS
+            current_app = row["application"] or ""
+            if current_app in app_options:
+                app_index = app_options.index(current_app)
+            else:
+                app_index = 0
             application = st.selectbox(
                 "Application",
-                [""] + APPLICATIONS,
-                index=([""] + APPLICATIONS).index(row["application"] or ""),
+                app_options,
+                index=app_index,
             )
         with col3:
             cat_opts = [
@@ -687,7 +738,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
                     (int(row["id"]), datetime.utcnow().isoformat(), row["status"], status),
                 )
-            cur.execute(
+            conn.execute(
                 """
                 UPDATE contacts SET
                     first_name=?, last_name=?, job_title=?, company=?, phone=?, email=?,
@@ -714,7 +765,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     website or None,
                     datetime.utcnow().isoformat(),
                     gender or None,
-                    application or None,
+                    normalize_application(application),
                     product or None,
                     int(row["id"]),
                 ),
@@ -724,7 +775,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.success("Saved")
             st.rerun()
 
-    # Photo
+    # Photo upload/replace
     with st.expander("📷 Photo"):
         ph_path = row.get("photo")
         if ph_path and os.path.exists(ph_path):
@@ -787,7 +838,7 @@ def add_contact_form(conn: sqlite3.Connection):
                 last = st.text_input("Last name")
                 company = st.text_input("Company")
                 email = st.text_input("Email")
-                application = st.selectbox("Application", [""] + APPLICATIONS)
+                application_raw = st.selectbox("Application", [""] + APPLICATIONS)
             with col3:
                 cat_opts = [
                     "PhD/Student",
@@ -821,6 +872,7 @@ def add_contact_form(conn: sqlite3.Connection):
                     scan_dt = datetime.utcnow().isoformat()
                     email_norm = (email or "").strip().lower() or None
                     status_norm = normalize_status(status) or "New"
+                    application_norm = normalize_application(application_raw)
 
                     conn.execute(
                         """
@@ -851,7 +903,7 @@ def add_contact_form(conn: sqlite3.Connection):
                             owner or None,
                             scan_dt,
                             gender or None,
-                            application or None,
+                            application_norm,
                             product or None,
                         ),
                     )
@@ -932,6 +984,9 @@ def main():
             index=False
         )
     ]
+    if not options:
+        return
+
     option_labels = {opt[0]: opt[1] for opt in options}
 
     chosen_id = st.selectbox(
