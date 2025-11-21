@@ -646,19 +646,21 @@ def show_priority_lists(conn: sqlite3.Connection):
         df_all["status"].isin(["Pending", "On hold", "Irrelevant"])
     )
 
+    hot_count = len(hot_df)
+    pot_count = len(pot_df)
+    cold_count = len(cold_df)
+
     col1, col2, col3 = st.columns(3)
 
     # HOT PANEL
     with col1:
-        st.markdown(
-            """
+        hot_header = f"""
             <div style="background-color:#ff6b6b;padding:6px 10px;border-radius:8px;
                         font-weight:600;color:white;text-align:center;margin-bottom:6px;">
-                🔥 Hot customers (Quoted / Meeting)
+                🔥 Hot customers ({hot_count}) — Quoted / Meeting
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        """
+        st.markdown(hot_header, unsafe_allow_html=True)
         if hot_df.empty:
             st.caption("No leads in this group.")
         else:
@@ -708,15 +710,13 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     # POTENTIAL PANEL
     with col2:
-        st.markdown(
-            """
+        pot_header = f"""
             <div style="background-color:#28a745;padding:6px 10px;border-radius:8px;
                         font-weight:600;color:white;text-align:center;margin-bottom:6px;">
-                🌱 Potential customers (New / Contacted)
+                🌱 Potential customers ({pot_count}) — New / Contacted
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        """
+        st.markdown(pot_header, unsafe_allow_html=True)
         if pot_df.empty:
             st.caption("No leads in this group.")
         else:
@@ -755,15 +755,13 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     # COLD PANEL
     with col3:
-        st.markdown(
-            """
+        cold_header = f"""
             <div style="background-color:#007bff;padding:6px 10px;border-radius:8px;
                         font-weight:600;color:white;text-align:center;margin-bottom:6px;">
-                ❄️ Cold customers (Pending / On hold / Irrelevant)
+                ❄️ Cold customers ({cold_count}) — Pending / On hold / Irrelevant
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        """
+        st.markdown(cold_header, unsafe_allow_html=True)
         if cold_df.empty:
             st.caption("No leads in this group.")
         else:
