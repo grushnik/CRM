@@ -915,14 +915,15 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 )
                 conn.commit()
                 backup_contacts(conn)
-                # clear note text in UI
-                st.session_state[note_key] = ""
+                # clear widget state by deleting keys
+                st.session_state.pop(note_key, None)
+                st.session_state.pop(fu_key, None)
                 st.success("Note added")
                 st.rerun()
     with col_clear_note:
         if st.button("Clear note", key=f"clearnote_{contact_id}"):
-            st.session_state[note_key] = ""
-            st.session_state[fu_key] = date.today()
+            st.session_state.pop(note_key, None)
+            st.session_state.pop(fu_key, None)
             st.rerun()
 
     notes_df = get_notes(conn, contact_id)
@@ -1049,7 +1050,7 @@ def add_contact_form(conn: sqlite3.Connection):
                     st.rerun()
 
             if clear:
-                # reset all form fields via session_state
+                # remove all widget state keys so form returns to defaults
                 for key in [
                     "add_first",
                     "add_job",
@@ -1071,12 +1072,7 @@ def add_contact_form(conn: sqlite3.Connection):
                     "add_country",
                     "add_website",
                 ]:
-                    if key in st.session_state:
-                        st.session_state[key] = ""
-
-                # defaults for some selects
-                st.session_state["add_category"] = "Industry"
-                st.session_state["add_status"] = "New"
+                    st.session_state.pop(key, None)
                 st.rerun()
 
 
