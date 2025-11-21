@@ -732,18 +732,26 @@ def show_priority_lists(conn: sqlite3.Connection):
                 format_func=lambda cid: pot_options.get(cid, str(cid)),
                 key="pot_select",
             )
-            if st.button("Move to Cold", key="btn_pot_to_cold"):
-                cur = conn.cursor()
-                cur.execute("SELECT status FROM contacts WHERE id=?", (selected_pot,))
-                old = (cur.fetchone() or ["New"])[0]
-                if old == "New":
-                    new_status = "Irrelevant"
-                elif old == "Contacted":
-                    new_status = "Pending"
-                else:
-                    new_status = old
-                update_contact_status(conn, selected_pot, new_status)
-                st.rerun()
+            c_pot1, c_pot2 = st.columns(2)
+            with c_pot1:
+                # Potential -> Hot (always Meeting)
+                if st.button("Move to Hot", key="btn_pot_to_hot"):
+                    update_contact_status(conn, selected_pot, "Meeting")
+                    st.rerun()
+            with c_pot2:
+                # Potential -> Cold (New -> Irrelevant, Contacted -> Pending)
+                if st.button("Move to Cold", key="btn_pot_to_cold"):
+                    cur = conn.cursor()
+                    cur.execute("SELECT status FROM contacts WHERE id=?", (selected_pot,))
+                    old = (cur.fetchone() or ["New"])[0]
+                    if old == "New":
+                        new_status = "Irrelevant"
+                    elif old == "Contacted":
+                        new_status = "Pending"
+                    else:
+                        new_status = old
+                    update_contact_status(conn, selected_pot, new_status)
+                    st.rerun()
 
     # COLD PANEL
     with col3:
@@ -760,7 +768,28 @@ def show_priority_lists(conn: sqlite3.Connection):
             st.caption("No leads in this group.")
         else:
             st.dataframe(cold_df, hide_index=True, use_container_width=True)
-            st.caption("Cold list is one-way for now (no moves defined).")
+
+            cold_options = {
+                int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
+                for row in cold_raw.itertuples()
+            }
+            selected_cold = st.selectbox(
+                "Pick cold lead to move",
+                list(cold_options.keys()),
+                format_func=lambda cid: cold_options.get(cid, str(cid)),
+                key="cold_select",
+            )
+            c_cold1, c_cold2 = st.columns(2)
+            with c_cold1:
+                # Cold -> Potential: Contacted
+                if st.button("Move to Potential", key="btn_cold_to_pot"):
+                    update_contact_status(conn, selected_cold, "Contacted")
+                    st.rerun()
+            with c_cold2:
+                # Cold -> Hot: Meeting
+                if st.button("Move to Hot", key="btn_cold_to_hot"):
+                    update_contact_status(conn, selected_cold, "Meeting")
+                    st.rerun()
 
 
 # -------------------------------------------------------------
