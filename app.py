@@ -29,6 +29,9 @@ APPLICATIONS = [
     "Hydrogen production",
     "Carbon black production",
     "Mining waste",
+    "Reentry",
+    "Propulsion",
+    "Methane reforming",
 ]
 
 PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
@@ -374,6 +377,12 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Carbon black production"
     if "mining" in s or "tailings" in s:
         return "Mining waste"
+    if "reentry" in s or "re-entry" in s:
+        return "Reentry"
+    if "propulsion" in s or "rocket" in s or "thruster" in s:
+        return "Propulsion"
+    if "methane" in s or "reforming" in s or "steam reforming" in s:
+        return "Methane reforming"
 
     # If nothing matches, we drop it (no canonical application)
     return None
@@ -581,6 +590,75 @@ def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 # -------------------------------------------------------------
+# TOP PRIORITY LISTS (HOT / POTENTIAL / COLD)
+# -------------------------------------------------------------
+def show_priority_lists(conn: sqlite3.Connection):
+    st.subheader("Customer overview")
+
+    df_all = pd.read_sql_query(
+        "SELECT id, first_name, last_name, company, email, status FROM contacts",
+        conn,
+    )
+
+    if df_all.empty:
+        st.caption("No contacts yet – add someone manually or import a file.")
+        return
+
+    def build_group(mask):
+        df = df_all[mask].copy()
+        if df.empty:
+            return pd.DataFrame(columns=["Name", "Company", "Email", "Status"])
+        df["Name"] = (
+            df["first_name"].fillna("") + " " + df["last_name"].fillna("")
+        ).str.strip()
+        df = df[["Name", "company", "email", "status"]].rename(
+            columns={"company": "Company", "email": "Email", "status": "Status"}
+        )
+        return df
+
+    hot_df = build_group(df_all["status"].isin(["Quoted", "Meeting"]))
+    pot_df = build_group(df_all["status"].isin(["New", "Contacted"]))
+    cold_df = build_group(
+        df_all["status"].isin(["Pending", "On hold", "Irrelevant"])
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    def render_panel(col, title, color, df):
+        with col:
+            st.markdown(
+                f"""
+                <div style="
+                    background-color:{color};
+                    padding:6px 10px;
+                    border-radius:8px;
+                    font-weight:600;
+                    color:white;
+                    text-align:center;
+                    margin-bottom:6px;">
+                    {title} ({len(df)})
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if df.empty:
+                st.caption("No leads in this group.")
+            else:
+                st.dataframe(df, hide_index=True, use_container_width=True)
+
+    render_panel(col1, "🔥 Hot customers (Quoted / Meeting)", "#ff6b6b", hot_df)
+    render_panel(
+        col2, "🌱 Potential customers (New / Contacted)", "#28a745", pot_df
+    )
+    render_panel(
+        col3,
+        "❄️ Cold customers (Pending / On hold / Irrelevant)",
+        "#007bff",
+        cold_df,
+    )
+
+
+# -------------------------------------------------------------
 # SIDEBAR IMPORT / EXPORT
 # -------------------------------------------------------------
 def sidebar_import_export(conn: sqlite3.Connection):
@@ -651,6 +729,8 @@ def save_photo(contact_id: int, uploaded_file) -> str:
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
 
+    contact_id = int(row["id"])
+
     # Header with photo next to name
     col_img, col_txt = st.columns([1, 4])
     with col_img:
@@ -664,9 +744,12 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         st.markdown(
             f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
         )
-        st.caption(f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}")
+        st.caption(
+            f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
+        )
 
-    with st.form(f"edit_{int(row['id'])}"):
+    # --- main edit form ---
+    with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
         with col1:
             first = st.text_input("First name", row["first_name"] or "")
@@ -683,15 +766,8 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             email = st.text_input("Email", row["email"] or "")
             app_options = [""] + APPLICATIONS
             current_app = row["application"] or ""
-            if current_app in app_options:
-                app_index = app_options.index(current_app)
-            else:
-                app_index = 0
-            application = st.selectbox(
-                "Application",
-                app_options,
-                index=app_index,
-            )
+            app_index = app_options.index(current_app) if current_app in app_options else 0
+            application = st.selectbox("Application", app_options, index=app_index)
         with col3:
             cat_opts = [
                 "PhD/Student",
@@ -730,13 +806,18 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         country = st.text_input("Country", row["country"] or "")
         website = st.text_input("Website", row["website"] or "")
 
-        saved = st.form_submit_button("Save changes")
+        col_save, col_delete = st.columns([3, 1])
+        with col_save:
+            saved = st.form_submit_button("Save changes")
+        with col_delete:
+            delete_pressed = st.form_submit_button("🗑️ Delete this contact")
+
         if saved:
             cur = conn.cursor()
             if row["status"] != status:
                 cur.execute(
                     "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
-                    (int(row["id"]), datetime.utcnow().isoformat(), row["status"], status),
+                    (contact_id, datetime.utcnow().isoformat(), row["status"], status),
                 )
             conn.execute(
                 """
@@ -767,12 +848,19 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     gender or None,
                     normalize_application(application),
                     product or None,
-                    int(row["id"]),
+                    contact_id,
                 ),
             )
             conn.commit()
             backup_contacts(conn)
             st.success("Saved")
+            st.rerun()
+
+        if delete_pressed:
+            conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
+            conn.commit()
+            backup_contacts(conn)
+            st.success("Contact deleted")
             st.rerun()
 
     # Photo upload/replace
@@ -783,12 +871,12 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         up = st.file_uploader(
             "Upload/replace photo",
             type=["png", "jpg", "jpeg", "webp"],
-            key=f"photo_{row['id']}",
+            key=f"photo_{contact_id}",
         )
         if up is not None:
-            saved_path = save_photo(int(row["id"]), up)
+            saved_path = save_photo(contact_id, up)
             conn.execute(
-                "UPDATE contacts SET photo=? WHERE id=?", (saved_path, int(row["id"]))
+                "UPDATE contacts SET photo=? WHERE id=?", (saved_path, contact_id)
             )
             conn.commit()
             backup_contacts(conn)
@@ -797,26 +885,47 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
     # Notes
     st.markdown("#### 🗒️ Notes")
-    new_note = st.text_area("Add a note", placeholder="Called; left voicemail…")
-    next_fu = st.date_input("Next follow-up", value=date.today())
-    if st.button("Add note", key=f"addnote_{int(row['id'])}"):
-        if new_note.strip():
-            ts_iso = datetime.utcnow().isoformat()
-            fu_iso = next_fu.isoformat() if isinstance(next_fu, date) else None
-            conn.execute(
-                "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                (int(row["id"]), ts_iso, new_note.strip(), fu_iso),
-            )
-            conn.execute(
-                "UPDATE contacts SET last_touch=? WHERE id=?",
-                (ts_iso, int(row["id"])),
-            )
-            conn.commit()
-            backup_contacts(conn)
-            st.success("Note added")
+    note_key = f"note_{contact_id}"
+    fu_key = f"nextfu_{contact_id}"
+
+    new_note = st.text_area(
+        "Add a note",
+        key=note_key,
+        placeholder="Called; left voicemail…",
+    )
+    next_fu = st.date_input(
+        "Next follow-up",
+        value=st.session_state.get(fu_key, date.today()),
+        key=fu_key,
+    )
+
+    col_add_note, col_clear_note = st.columns([2, 1])
+    with col_add_note:
+        if st.button("Add note", key=f"addnote_{contact_id}"):
+            if new_note.strip():
+                ts_iso = datetime.utcnow().isoformat()
+                fu_iso = next_fu.isoformat() if isinstance(next_fu, date) else None
+                conn.execute(
+                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                    (contact_id, ts_iso, new_note.strip(), fu_iso),
+                )
+                conn.execute(
+                    "UPDATE contacts SET last_touch=? WHERE id=?",
+                    (ts_iso, contact_id),
+                )
+                conn.commit()
+                backup_contacts(conn)
+                # clear note text in UI
+                st.session_state[note_key] = ""
+                st.success("Note added")
+                st.rerun()
+    with col_clear_note:
+        if st.button("Clear note", key=f"clearnote_{contact_id}"):
+            st.session_state[note_key] = ""
+            st.session_state[fu_key] = date.today()
             st.rerun()
 
-    notes_df = get_notes(conn, int(row["id"]))
+    notes_df = get_notes(conn, contact_id)
     st.dataframe(notes_df, use_container_width=True)
 
 
@@ -830,15 +939,23 @@ def add_contact_form(conn: sqlite3.Connection):
         with st.form("add_contact_form"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                first = st.text_input("First name")
-                job = st.text_input("Job title")
-                phone = st.text_input("Phone")
-                gender = st.selectbox("Gender", ["", "Female", "Male", "Other"])
+                first = st.text_input("First name", key="add_first")
+                job = st.text_input("Job title", key="add_job")
+                phone = st.text_input("Phone", key="add_phone")
+                gender = st.selectbox(
+                    "Gender",
+                    ["", "Female", "Male", "Other"],
+                    key="add_gender",
+                )
             with col2:
-                last = st.text_input("Last name")
-                company = st.text_input("Company")
-                email = st.text_input("Email")
-                application_raw = st.selectbox("Application", [""] + APPLICATIONS)
+                last = st.text_input("Last name", key="add_last")
+                company = st.text_input("Company", key="add_company")
+                email = st.text_input("Email", key="add_email")
+                application_raw = st.selectbox(
+                    "Application",
+                    [""] + APPLICATIONS,
+                    key="add_application",
+                )
             with col3:
                 cat_opts = [
                     "PhD/Student",
@@ -847,21 +964,40 @@ def add_contact_form(conn: sqlite3.Connection):
                     "Industry",
                     "Other",
                 ]
-                category = st.selectbox("Category", cat_opts, index=3)  # default Industry
-                status = st.selectbox("Status", PIPELINE, index=0)
-                owner = st.text_input("Owner")
-                product = st.selectbox("Product type interest", [""] + PRODUCTS)
+                category = st.selectbox(
+                    "Category",
+                    cat_opts,
+                    index=3,  # default Industry
+                    key="add_category",
+                )
+                status = st.selectbox(
+                    "Status",
+                    PIPELINE,
+                    index=0,
+                    key="add_status",
+                )
+                owner = st.text_input("Owner", key="add_owner")
+                product = st.selectbox(
+                    "Product type interest",
+                    [""] + PRODUCTS,
+                    key="add_product",
+                )
 
             st.write("**Address**")
-            street = st.text_input("Street")
-            street2 = st.text_input("Street 2")
-            city = st.text_input("City")
-            state = st.text_input("State/Province")
-            zipc = st.text_input("ZIP")
-            country = st.text_input("Country")
-            website = st.text_input("Website")
+            street = st.text_input("Street", key="add_street")
+            street2 = st.text_input("Street 2", key="add_street2")
+            city = st.text_input("City", key="add_city")
+            state = st.text_input("State/Province", key="add_state")
+            zipc = st.text_input("ZIP", key="add_zip")
+            country = st.text_input("Country", key="add_country")
+            website = st.text_input("Website", key="add_website")
 
-            submitted = st.form_submit_button("Create contact")
+            col_create, col_clear = st.columns([3, 1])
+            with col_create:
+                submitted = st.form_submit_button("Create contact")
+            with col_clear:
+                clear = st.form_submit_button("Clear form")
+
             if submitted:
                 # Basic validation: at least email or (first+last+company)
                 if not email and not (first and last and company):
@@ -910,7 +1046,38 @@ def add_contact_form(conn: sqlite3.Connection):
                     conn.commit()
                     backup_contacts(conn)
                     st.success("New contact created")
-                    st.experimental_rerun()
+                    st.rerun()
+
+            if clear:
+                # reset all form fields via session_state
+                for key in [
+                    "add_first",
+                    "add_job",
+                    "add_phone",
+                    "add_gender",
+                    "add_last",
+                    "add_company",
+                    "add_email",
+                    "add_application",
+                    "add_category",
+                    "add_status",
+                    "add_owner",
+                    "add_product",
+                    "add_street",
+                    "add_street2",
+                    "add_city",
+                    "add_state",
+                    "add_zip",
+                    "add_country",
+                    "add_website",
+                ]:
+                    if key in st.session_state:
+                        st.session_state[key] = ""
+
+                # defaults for some selects
+                st.session_state["add_category"] = "Industry"
+                st.session_state["add_status"] = "New"
+                st.rerun()
 
 
 # -------------------------------------------------------------
@@ -928,6 +1095,9 @@ def main():
     restore_from_backup_if_empty(conn)
 
     sidebar_import_export(conn)
+
+    # Top overview windows
+    show_priority_lists(conn)
 
     # Manual add UI (works even if DB is empty)
     add_contact_form(conn)
