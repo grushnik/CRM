@@ -53,18 +53,10 @@ PIPELINE = [
 # TELEGRAM OTP (2-FACTOR)
 # -------------------------------------------------------------
 def _send_telegram_otp(code: str):
-    """
-    Send OTP to Telegram using Bot API.
-
-    Requires secrets:
-      TELEGRAM_BOT_TOKEN
-      TELEGRAM_CHAT_ID
-    """
     token = st.secrets.get("TELEGRAM_BOT_TOKEN")
     chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
 
     if not (token and chat_id):
-        # Never lock you out: show the code if secrets missing
         st.sidebar.warning(
             f"⚠️ Telegram secrets not configured. Use this one-time code: **{code}**"
         )
@@ -87,10 +79,6 @@ def _send_telegram_otp(code: str):
 
 
 def check_login_two_factor_telegram():
-    """
-    Step 1: password (CatJorge or APP_PASSWORD secret)
-    Step 2: 6-digit code sent to Telegram (also shown as backup).
-    """
     expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
 
     ss = st.session_state
@@ -98,17 +86,15 @@ def check_login_two_factor_telegram():
     ss.setdefault("authed", False)
 
     if ss["authed"]:
-        return  # already logged in
+        return
 
     st.sidebar.header("🔐 Login")
 
-    # ---- STEP 1: password ----
     if not ss["auth_pw_ok"]:
         pwd = st.sidebar.text_input("Password", type="password")
         if st.sidebar.button("Continue"):
             if pwd == expected:
                 ss["auth_pw_ok"] = True
-                # generate & send OTP
                 code = f"{random.randint(0, 999999):06d}"
                 ss["otp_code"] = code
                 ss["otp_time"] = int(time.time())
@@ -118,7 +104,6 @@ def check_login_two_factor_telegram():
                 st.sidebar.error("Wrong password")
         st.stop()
 
-    # ---- STEP 2: OTP ----
     if "otp_time" in ss and int(time.time()) - ss["otp_time"] > OTP_TTL_SECONDS:
         for k in ("auth_pw_ok", "otp_code", "otp_time"):
             ss.pop(k, None)
@@ -202,7 +187,6 @@ def init_db(conn: sqlite3.Connection):
 
 
 def backup_contacts(conn: sqlite3.Connection):
-    """Write a CSV backup of all contacts to BACKUP_FILE."""
     df = pd.read_sql_query("SELECT * FROM contacts", conn)
     if not df.empty:
         os.makedirs("data", exist_ok=True)
@@ -210,7 +194,6 @@ def backup_contacts(conn: sqlite3.Connection):
 
 
 def restore_from_backup_if_empty(conn: sqlite3.Connection):
-    """If DB has zero contacts but backup CSV exists, restore from it."""
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM contacts")
     n = cur.fetchone()[0]
@@ -325,7 +308,6 @@ def parse_dt(v) -> Optional[str]:
 
 
 def normalize_status(val: Any) -> Optional[str]:
-    """Map free-text status to one of PIPELINE or None."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     s = str(val).strip().lower()
@@ -350,19 +332,16 @@ def normalize_status(val: Any) -> Optional[str]:
 
 
 def normalize_application(val: Any) -> Optional[str]:
-    """Map free-text application to one of APPLICATIONS or None."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     s = str(val).strip().lower()
     if not s:
         return None
 
-    # Exact matches
     for app in APPLICATIONS:
         if s == app.lower():
             return app
 
-    # Keyword-based mapping
     if "pfas" in s:
         return "PFAS destruction"
     if "co2" in s or "carbon dioxide" in s:
@@ -384,7 +363,6 @@ def normalize_application(val: Any) -> Optional[str]:
     if "methane" in s or "reforming" in s or "steam reforming" in s:
         return "Methane reforming"
 
-    # If nothing matches, we drop it (no canonical application)
     return None
 
 
@@ -402,7 +380,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         note_text = (r.get("notes") or "").strip()
         photo_path = (r.get("photo") or "").strip() or None
 
-        # Look up existing contact
         if email:
             cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,))
             row = cur.fetchone()
@@ -441,7 +418,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         product_interest = r.get("product_interest") or None
 
         if existing_id:
-            # Log status history if changed by import
             if existing_status != final_status:
                 cur.execute(
                     """
@@ -488,7 +464,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             )
             contact_id = cur.lastrowid
 
-        # If there is a notes column (comments/email responses), store as a note
         if note_text:
             ts_iso = r["scan_datetime"] or datetime.utcnow().isoformat()
             cur.execute(
@@ -509,7 +484,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
 
 # -------------------------------------------------------------
-# QUERIES
+# QUERIES & STATUS UPDATE
 # -------------------------------------------------------------
 def query_contacts(
     conn: sqlite3.Connection,
@@ -567,10 +542,6 @@ def get_notes(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
 
 
 def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
-    """
-    Aggregated notes per contact for export:
-    one string per contact, all notes joined by ' || ' in time order.
-    """
     df = pd.read_sql_query(
         "SELECT contact_id, ts, body FROM notes ORDER BY contact_id, ts", conn
     )
@@ -589,6 +560,59 @@ def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
     return grouped
 
 
+def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status: str):
+    """Update status and log history."""
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM contacts WHERE id=?", (contact_id,))
+    row = cur.fetchone()
+    if not row:
+        return
+    old_status = row[0] or "New"
+    if old_status == new_status:
+        return
+
+    ts_iso = datetime.utcnow().isoformat()
+    cur.execute(
+        """
+        INSERT INTO status_history(contact_id, ts, old_status, new_status)
+        VALUES (?,?,?,?)
+        """,
+        (contact_id, ts_iso, old_status, new_status),
+    )
+    cur.execute(
+        "UPDATE contacts SET status=?, last_touch=? WHERE id=?",
+        (new_status, ts_iso, contact_id),
+    )
+    conn.commit()
+    backup_contacts(conn)
+
+
+# -------------------------------------------------------------
+# WON COUNTER
+# -------------------------------------------------------------
+def show_won_counter(conn: sqlite3.Connection):
+    df = pd.read_sql_query(
+        "SELECT COUNT(*) AS n FROM contacts WHERE status='Won'", conn
+    )
+    n = int(df.iloc[0]["n"]) if not df.empty else 0
+    st.markdown(
+        f"""
+        <div style="
+            text-align:right;
+            padding:6px 10px;
+            border-radius:8px;
+            background-color:#222;
+            color:#fff;
+            font-family:system-ui, sans-serif;
+        ">
+            <div style="font-size:12px; opacity:0.7;">Sold systems</div>
+            <div style="font-size:32px; font-weight:700;">{n}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # -------------------------------------------------------------
 # TOP PRIORITY LISTS (HOT / POTENTIAL / COLD)
 # -------------------------------------------------------------
@@ -605,57 +629,138 @@ def show_priority_lists(conn: sqlite3.Connection):
         return
 
     def build_group(mask):
-        df = df_all[mask].copy()
-        if df.empty:
-            return pd.DataFrame(columns=["Name", "Company", "Email", "Status"])
-        df["Name"] = (
-            df["first_name"].fillna("") + " " + df["last_name"].fillna("")
+        sub = df_all[mask].copy()
+        if sub.empty:
+            return sub, pd.DataFrame(columns=["Name", "Company", "Email", "Status"])
+        sub["Name"] = (
+            sub["first_name"].fillna("") + " " + sub["last_name"].fillna("")
         ).str.strip()
-        df = df[["Name", "company", "email", "status"]].rename(
+        display = sub[["Name", "company", "email", "status"]].rename(
             columns={"company": "Company", "email": "Email", "status": "Status"}
         )
-        return df
+        return sub, display
 
-    hot_df = build_group(df_all["status"].isin(["Quoted", "Meeting"]))
-    pot_df = build_group(df_all["status"].isin(["New", "Contacted"]))
-    cold_df = build_group(
+    hot_raw, hot_df = build_group(df_all["status"].isin(["Quoted", "Meeting"]))
+    pot_raw, pot_df = build_group(df_all["status"].isin(["New", "Contacted"]))
+    cold_raw, cold_df = build_group(
         df_all["status"].isin(["Pending", "On hold", "Irrelevant"])
     )
 
     col1, col2, col3 = st.columns(3)
 
-    def render_panel(col, title, color, df):
-        with col:
-            st.markdown(
-                f"""
-                <div style="
-                    background-color:{color};
-                    padding:6px 10px;
-                    border-radius:8px;
-                    font-weight:600;
-                    color:white;
-                    text-align:center;
-                    margin-bottom:6px;">
-                    {title} ({len(df)})
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if df.empty:
-                st.caption("No leads in this group.")
-            else:
-                st.dataframe(df, hide_index=True, use_container_width=True)
+    # HOT PANEL
+    with col1:
+        st.markdown(
+            """
+            <div style="background-color:#ff6b6b;padding:6px 10px;border-radius:8px;
+                        font-weight:600;color:white;text-align:center;margin-bottom:6px;">
+                🔥 Hot customers (Quoted / Meeting)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if hot_df.empty:
+            st.caption("No leads in this group.")
+        else:
+            st.dataframe(hot_df, hide_index=True, use_container_width=True)
 
-    render_panel(col1, "🔥 Hot customers (Quoted / Meeting)", "#ff6b6b", hot_df)
-    render_panel(
-        col2, "🌱 Potential customers (New / Contacted)", "#28a745", pot_df
-    )
-    render_panel(
-        col3,
-        "❄️ Cold customers (Pending / On hold / Irrelevant)",
-        "#007bff",
-        cold_df,
-    )
+            hot_options = {
+                int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
+                for row in hot_raw.itertuples()
+            }
+            selected_hot = st.selectbox(
+                "Pick hot lead to move",
+                list(hot_options.keys()),
+                format_func=lambda cid: hot_options.get(cid, str(cid)),
+                key="hot_select",
+            )
+            c_hot1, c_hot2 = st.columns(2)
+            with c_hot1:
+                if st.button("Move to Potential", key="btn_hot_to_pot"):
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT status FROM contacts WHERE id=?", (selected_hot,)
+                    )
+                    old = (cur.fetchone() or ["New"])[0]
+                    if old == "Quoted":
+                        new_status = "Lost"
+                    elif old == "Meeting":
+                        new_status = "Contacted"
+                    else:
+                        new_status = old
+                    update_contact_status(conn, selected_hot, new_status)
+                    st.rerun()
+            with c_hot2:
+                if st.button("Move to Cold", key="btn_hot_to_cold"):
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT status FROM contacts WHERE id=?", (selected_hot,)
+                    )
+                    old = (cur.fetchone() or ["New"])[0]
+                    if old == "Quoted":
+                        new_status = "Lost"
+                    elif old == "Meeting":
+                        new_status = "Pending"
+                    else:
+                        new_status = old
+                    update_contact_status(conn, selected_hot, new_status)
+                    st.rerun()
+
+    # POTENTIAL PANEL
+    with col2:
+        st.markdown(
+            """
+            <div style="background-color:#28a745;padding:6px 10px;border-radius:8px;
+                        font-weight:600;color:white;text-align:center;margin-bottom:6px;">
+                🌱 Potential customers (New / Contacted)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if pot_df.empty:
+            st.caption("No leads in this group.")
+        else:
+            st.dataframe(pot_df, hide_index=True, use_container_width=True)
+
+            pot_options = {
+                int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
+                for row in pot_raw.itertuples()
+            }
+            selected_pot = st.selectbox(
+                "Pick potential lead to move",
+                list(pot_options.keys()),
+                format_func=lambda cid: pot_options.get(cid, str(cid)),
+                key="pot_select",
+            )
+            if st.button("Move to Cold", key="btn_pot_to_cold"):
+                cur = conn.cursor()
+                cur.execute("SELECT status FROM contacts WHERE id=?", (selected_pot,))
+                old = (cur.fetchone() or ["New"])[0]
+                if old == "New":
+                    new_status = "Irrelevant"
+                elif old == "Contacted":
+                    new_status = "Pending"
+                else:
+                    new_status = old
+                update_contact_status(conn, selected_pot, new_status)
+                st.rerun()
+
+    # COLD PANEL
+    with col3:
+        st.markdown(
+            """
+            <div style="background-color:#007bff;padding:6px 10px;border-radius:8px;
+                        font-weight:600;color:white;text-align:center;margin-bottom:6px;">
+                ❄️ Cold customers (Pending / On hold / Irrelevant)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if cold_df.empty:
+            st.caption("No leads in this group.")
+        else:
+            st.dataframe(cold_df, hide_index=True, use_container_width=True)
+            st.caption("Cold list is one-way for now (no moves defined).")
 
 
 # -------------------------------------------------------------
@@ -731,7 +836,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
     contact_id = int(row["id"])
 
-    # Header with photo next to name
     col_img, col_txt = st.columns([1, 4])
     with col_img:
         ph_path = row.get("photo")
@@ -748,7 +852,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
         )
 
-    # --- main edit form ---
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -863,7 +966,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.success("Contact deleted")
             st.rerun()
 
-    # Photo upload/replace
     with st.expander("📷 Photo"):
         ph_path = row.get("photo")
         if ph_path and os.path.exists(ph_path):
@@ -883,7 +985,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.success("Photo saved")
             st.rerun()
 
-    # Notes
     st.markdown("#### 🗒️ Notes")
     note_key = f"note_{contact_id}"
     fu_key = f"nextfu_{contact_id}"
@@ -915,7 +1016,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 )
                 conn.commit()
                 backup_contacts(conn)
-                # clear widget state by deleting keys
                 st.session_state.pop(note_key, None)
                 st.session_state.pop(fu_key, None)
                 st.success("Note added")
@@ -968,7 +1068,7 @@ def add_contact_form(conn: sqlite3.Connection):
                 category = st.selectbox(
                     "Category",
                     cat_opts,
-                    index=3,  # default Industry
+                    index=3,
                     key="add_category",
                 )
                 status = st.selectbox(
@@ -1000,7 +1100,6 @@ def add_contact_form(conn: sqlite3.Connection):
                 clear = st.form_submit_button("Clear form")
 
             if submitted:
-                # Basic validation: at least email or (first+last+company)
                 if not email and not (first and last and company):
                     st.error(
                         "Please provide either an email, or first name + last name + company."
@@ -1050,7 +1149,6 @@ def add_contact_form(conn: sqlite3.Connection):
                     st.rerun()
 
             if clear:
-                # remove all widget state keys so form returns to defaults
                 for key in [
                     "add_first",
                     "add_job",
@@ -1083,26 +1181,26 @@ def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     check_login_two_factor_telegram()
 
-    st.title(APP_TITLE)
-    st.caption("Upload leads → categorize → work the pipeline → export.")
-
     conn = get_conn()
     init_db(conn)
     restore_from_backup_if_empty(conn)
 
+    top_l, top_r = st.columns([3, 1])
+    with top_l:
+        st.title(APP_TITLE)
+        st.caption("Upload leads → categorize → work the pipeline → export.")
+    with top_r:
+        show_won_counter(conn)
+
     sidebar_import_export(conn)
 
-    # Top overview windows
     show_priority_lists(conn)
 
-    # Manual add UI (works even if DB is empty)
     add_contact_form(conn)
 
-    # Filters + contact table
     q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
     df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
-    # Attach aggregated notes for export / viewing
     notes_agg = get_notes_agg(conn)
     if not notes_agg.empty:
         df = df.merge(notes_agg, how="left", left_on="id", right_on="contact_id")
@@ -1134,8 +1232,8 @@ def main():
         "application",
         "product_interest",
         "last_touch",
-        "notes",   # include notes in export
-        "photo",   # include photo path in export
+        "notes",
+        "photo",
     ]
     available_cols = [c for c in export_cols if c in df.columns]
     st.session_state["export_df"] = df[available_cols].copy()
@@ -1143,7 +1241,6 @@ def main():
     st.subheader("Contacts")
     st.dataframe(df[available_cols], use_container_width=True, hide_index=True)
 
-    # Build selectbox options
     options = [
         (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
         for r in df[["id", "first_name", "last_name", "company"]].itertuples(
