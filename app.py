@@ -212,12 +212,17 @@ def restore_from_backup_if_empty(conn: sqlite3.Connection):
 COLMAP = {
     "scan date/time": "scan_datetime",
     "first name": "first_name",
+    "first_name": "first_name",
     "last name": "last_name",
+    "last_name": "last_name",
     "job title": "job_title",
+    "job_title": "job_title",
     "company": "company",
     "street": "street",
     "street (line 2)": "street2",
+    "street2": "street2",
     "zip code": "zip_code",
+    "zip_code": "zip_code",
     "city": "city",
     "state/province": "state",
     "state": "state",
@@ -233,6 +238,7 @@ COLMAP = {
     "gender": "gender",
     "application": "application",
     "product interest": "product_interest",
+    "product_interest": "product_interest",
     "product_type_interest": "product_interest",
     "status": "status",
     "pipeline": "status",
@@ -273,7 +279,7 @@ IND_PAT = re.compile(
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     new_cols = {
-        c: COLMAP.get(c.strip().lower(), c.strip().lower())
+        c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower())
         for c in df.columns
     }
     df = df.rename(columns=new_cols)
@@ -364,6 +370,85 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Methane reforming"
 
     return None
+
+
+# -------------------------------------------------------------
+# FLEXIBLE FILE LOADER (handles Book2.xlsx-style files)
+# -------------------------------------------------------------
+def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Some files (like Book2.xlsx) have all columns named 'Unnamed: x'
+    and the *first data row* actually contains the header names:
+    [NaN, 'first_name', 'last_name', 'email', ...].
+
+    This function detects that pattern and promotes row 0 to header.
+    """
+    cols_lower = [str(c).strip().lower() for c in df.columns]
+
+    # If we already have 'first_name' or 'first name' as a column, nothing to do.
+    if "first_name" in cols_lower or "first name" in cols_lower:
+        return df
+
+    if df.empty:
+        return df
+
+    first_row = df.iloc[0]
+    first_vals = [
+        "" if (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+        for v in first_row
+    ]
+    first_vals_lower = [v.lower() for v in first_vals]
+
+    known = set(COLMAP.keys()) | set(EXPECTED) | {
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "job_title",
+        "company",
+        "city",
+        "state",
+        "country",
+        "category",
+        "status",
+        "owner",
+        "gender",
+        "application",
+        "product_interest",
+        "last_touch",
+        "notes",
+        "photo",
+    }
+
+    score = sum(1 for v in first_vals_lower if v in known)
+
+    # Heuristic: if we see at least 3 known header names in row 0, treat it as header.
+    if score >= 3:
+        new_cols = []
+        for i, val in enumerate(first_vals_lower):
+            if val == "":
+                new_cols.append(f"extra_{i}")
+            else:
+                new_cols.append(val)
+        df = df.iloc[1:].reset_index(drop=True)
+        df.columns = new_cols
+
+        # Drop completely empty 'extra_*' columns
+        for c in list(df.columns):
+            if c.startswith("extra_") and df[c].isna().all():
+                df = df.drop(columns=[c])
+
+    return df
+
+
+def load_contacts_file(uploaded_file) -> pd.DataFrame:
+    """Load CSV/XLSX and fix header row if needed."""
+    if uploaded_file.name.lower().endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    df = _fix_header_row_if_needed(df)
+    return df
 
 
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
@@ -561,7 +646,6 @@ def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status: str):
-    """Update status and log history."""
     cur = conn.cursor()
     cur.execute("SELECT status FROM contacts WHERE id=?", (contact_id,))
     row = cur.fetchone()
@@ -802,7 +886,7 @@ def sidebar_import_export(conn: sqlite3.Connection):
         "Upload Excel/CSV (Contacts)", type=["xlsx", "xls", "csv"]
     )
     if up is not None:
-        df = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
+        df = load_contacts_file(up)
         n = upsert_contacts(conn, df)
         st.sidebar.success(f"Imported/updated {n} contacts")
 
