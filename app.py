@@ -678,6 +678,7 @@ def show_priority_lists(conn: sqlite3.Connection):
             )
             c_hot1, c_hot2 = st.columns(2)
             with c_hot1:
+                # Hot -> Potential
                 if st.button("Move to Potential", key="btn_hot_to_pot"):
                     cur = conn.cursor()
                     cur.execute(
@@ -693,6 +694,7 @@ def show_priority_lists(conn: sqlite3.Connection):
                     update_contact_status(conn, selected_hot, new_status)
                     st.rerun()
             with c_hot2:
+                # Hot -> Cold
                 if st.button("Move to Cold", key="btn_hot_to_cold"):
                     cur = conn.cursor()
                     cur.execute(
@@ -885,10 +887,16 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             first = st.text_input("First name", row["first_name"] or "")
             job = st.text_input("Job title", row["job_title"] or "")
             phone = st.text_input("Phone", row["phone"] or "")
+
+            gender_options = ["", "Female", "Male", "Other"]
+            raw_gender = row["gender"] or ""
+            current_gender = raw_gender if raw_gender in gender_options else ""
+            gender_index = gender_options.index(current_gender)
+
             gender = st.selectbox(
                 "Gender",
-                ["", "Female", "Male", "Other"],
-                index=["", "Female", "Male", "Other"].index(row["gender"] or ""),
+                gender_options,
+                index=gender_index,
             )
         with col2:
             last = st.text_input("Last name", row["last_name"] or "")
@@ -920,11 +928,17 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 if row["status"] in PIPELINE
                 else 0,
             )
+
+            product_options = [""] + PRODUCTS
+            raw_prod = row["product_interest"] or ""
+            current_prod = raw_prod if raw_prod in product_options else ""
+            prod_index = product_options.index(current_prod)
+
             owner = st.text_input("Owner", row["owner"] or "")
             product = st.selectbox(
                 "Product type interest",
-                [""] + PRODUCTS,
-                index=([""] + PRODUCTS).index(row["product_interest"] or ""),
+                product_options,
+                index=prod_index,
             )
 
         st.write("**Address**")
