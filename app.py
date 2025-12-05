@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 import requests
+import streamlit.components.v1 as components  # currently unused but OK
 
 # -------------------------------------------------------------
 # BASIC CONFIG
@@ -21,23 +22,24 @@ BACKUP_FILE = "data/contacts_backup.csv"
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
 
-# Applications in alphabetical order
+# Base applications list; we sort it alphabetically after defining
 APPLICATIONS = [
-    "Carbon black production",
-    "CO2 conversion",
-    "Communication",
-    "Hydrogen production",
-    "Methane reforming",
-    "Mining waste",
-    "Nitrification",
-    "NOx production",
     "PFAS destruction",
-    "Propulsion",
-    "Reentry",
-    "Surface treatment",
-    "Ultrasonic",
+    "CO2 conversion",
     "Waste-to-Energy",
+    "NOx production",
+    "Hydrogen production",
+    "Carbon black production",
+    "Mining waste",
+    "Reentry",
+    "Propulsion",
+    "Methane reforming",
+    "Communication",
+    "Ultrasonic",
+    "Nitrification",
+    "Surface treatment",
 ]
+APPLICATIONS = sorted(APPLICATIONS)
 
 PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
 
@@ -134,6 +136,7 @@ def check_login_two_factor_telegram():
 # -------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
+    # We keep images dir for backwards compatibility, even if we no longer use photos
     os.makedirs("data/images", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -166,7 +169,8 @@ def init_db(conn: sqlite3.Connection):
           gender TEXT,
           application TEXT,
           product_interest TEXT,
-          photo TEXT
+          photo TEXT,
+          linkedin_url TEXT
         );
 
         CREATE TABLE IF NOT EXISTS notes (
@@ -189,7 +193,7 @@ def init_db(conn: sqlite3.Connection):
         """
     )
 
-    # Ensure linkedin_url column exists
+    # In case the DB was created before linkedin_url was added
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(contacts)")
     cols = [row[1] for row in cur.fetchall()]
@@ -363,18 +367,19 @@ def normalize_application(val: Any) -> Optional[str]:
     if not s:
         return None
 
-    # Exact dropdown matches first
+    # Exact match to one of our known labels
     for app in APPLICATIONS:
         if s == app.lower():
             return app
 
-    # Heuristics
+    # Keyword-based mapping
     if "pfas" in s:
         return "PFAS destruction"
     if "co2" in s or "carbon dioxide" in s:
         return "CO2 conversion"
     if "waste" in s or "gasification" in s or "rdf" in s:
         return "Waste-to-Energy"
+    # Treat "nitrification" as its own vertical, separate from generic NOx
     if "nitrification" in s:
         return "Nitrification"
     if "nox" in s or "nitric" in s or "nitrate" in s:
@@ -391,11 +396,11 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Propulsion"
     if "methane" in s or "reforming" in s or "steam reforming" in s:
         return "Methane reforming"
-    if "communication" in s or "telecom" in s:
+    if "communication" in s or "telecom" in s or "rf link" in s:
         return "Communication"
-    if "ultrasonic" in s:
+    if "ultrasonic" in s or "ultrasound" in s or "acoustic" in s:
         return "Ultrasonic"
-    if "surface" in s and "treat" in s:
+    if "surface treatment" in s or "coating" in s or "etch" in s:
         return "Surface treatment"
 
     return None
@@ -406,11 +411,15 @@ def normalize_application(val: Any) -> Optional[str]:
 # -------------------------------------------------------------
 def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Some files have all columns named 'Unnamed: x'
-    and the first data row actually contains header names.
+    Some files (like Book2.xlsx) have all columns named 'Unnamed: x'
+    and the *first data row* actually contains the header names:
+    [NaN, 'first_name', 'last_name', 'email', ...].
+
+    This function detects that pattern and promotes row 0 to header.
     """
     cols_lower = [str(c).strip().lower() for c in df.columns]
 
+    # If we already have 'first_name' or 'first name' as a column, nothing to do.
     if "first_name" in cols_lower or "first name" in cols_lower:
         return df
 
@@ -447,6 +456,7 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
 
     score = sum(1 for v in first_vals_lower if v in known)
 
+    # Heuristic: if we see at least 3 known header names in row 0, treat it as header.
     if score >= 3:
         new_cols = []
         for i, val in enumerate(first_vals_lower):
@@ -457,6 +467,7 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
         df.columns = new_cols
 
+        # Drop completely empty 'extra_*' columns
         for c in list(df.columns):
             if c.startswith("extra_") and df[c].isna().all():
                 df = df.drop(columns=[c])
@@ -567,7 +578,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
                  city, state, country, phone, email, website, category, status, gender, application,
                  product_interest, photo, linkedin_url)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 payload_common
                 + (
@@ -794,6 +805,7 @@ def show_priority_lists(conn: sqlite3.Connection):
             )
             c_hot1, c_hot2 = st.columns(2)
             with c_hot1:
+                # Hot -> Potential
                 if st.button("Move to Potential", key="btn_hot_to_pot"):
                     cur = conn.cursor()
                     cur.execute(
@@ -809,6 +821,7 @@ def show_priority_lists(conn: sqlite3.Connection):
                     update_contact_status(conn, selected_hot, new_status)
                     st.rerun()
             with c_hot2:
+                # Hot -> Cold
                 if st.button("Move to Cold", key="btn_hot_to_cold"):
                     cur = conn.cursor()
                     cur.execute(
@@ -850,15 +863,15 @@ def show_priority_lists(conn: sqlite3.Connection):
             )
             c_pot1, c_pot2 = st.columns(2)
             with c_pot1:
+                # Potential -> Hot (always Meeting)
                 if st.button("Move to Hot", key="btn_pot_to_hot"):
                     update_contact_status(conn, selected_pot, "Meeting")
                     st.rerun()
             with c_pot2:
+                # Potential -> Cold (New -> Irrelevant, Contacted -> Pending)
                 if st.button("Move to Cold", key="btn_pot_to_cold"):
                     cur = conn.cursor()
-                    cur.execute(
-                        "SELECT status FROM contacts WHERE id=?", (selected_pot,)
-                    )
+                    cur.execute("SELECT status FROM contacts WHERE id=?", (selected_pot,))
                     old = (cur.fetchone() or ["New"])[0]
                     if old == "New":
                         new_status = "Irrelevant"
@@ -895,10 +908,12 @@ def show_priority_lists(conn: sqlite3.Connection):
             )
             c_cold1, c_cold2 = st.columns(2)
             with c_cold1:
+                # Cold -> Potential: Contacted
                 if st.button("Move to Potential", key="btn_cold_to_pot"):
                     update_contact_status(conn, selected_cold, "Contacted")
                     st.rerun()
             with c_cold2:
+                # Cold -> Hot: Meeting
                 if st.button("Move to Hot", key="btn_cold_to_hot"):
                     update_contact_status(conn, selected_cold, "Meeting")
                     st.rerun()
@@ -960,19 +975,20 @@ def filters_ui():
 
 
 # -------------------------------------------------------------
-# CONTACT EDITOR (no photo UI, simple LinkedIn link)
+# CONTACT EDITOR (no photo UI, LinkedIn link only)
 # -------------------------------------------------------------
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
 
     contact_id = int(row["id"])
 
-    st.markdown(
-        f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
-    )
+    name = f"{row['first_name']} {row['last_name']}".strip()
+    company = row.get("company") or ""
+    st.markdown(f"### ✏️ {name} — {company}")
     st.caption(
         f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
     )
+
     linkedin_url_header = row.get("linkedin_url")
     if linkedin_url_header:
         st.markdown(f"🔗 LinkedIn: [{linkedin_url_header}]({linkedin_url_header})")
@@ -1105,11 +1121,15 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.success("Contact deleted")
             st.rerun()
 
-    # LinkedIn: simple link, no iframe (LinkedIn blocks embedding)
+    # LinkedIn preview (no iframe because LinkedIn blocks embedding)
     with st.expander("🔗 LinkedIn profile"):
         linkedin_url = row.get("linkedin_url")
         if linkedin_url:
             st.markdown(f"[Open profile in new tab]({linkedin_url})")
+            st.caption(
+                "LinkedIn does not allow embedding profiles inside other sites, "
+                "so click the link above to view the profile."
+            )
         else:
             st.caption("No LinkedIn URL saved for this contact.")
 
@@ -1346,7 +1366,7 @@ def main():
         )
         return
 
-    # Export columns: photo REMOVED from download file
+    # Export: remove photo, keep linkedin_url
     export_cols = [
         "first_name",
         "last_name",
