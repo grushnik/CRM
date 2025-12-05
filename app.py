@@ -10,7 +10,6 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 import requests
-import streamlit.components.v1 as components  # currently unused but OK
 
 # -------------------------------------------------------------
 # BASIC CONFIG
@@ -22,24 +21,25 @@ BACKUP_FILE = "data/contacts_backup.csv"
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
 
-# Base applications list; we sort it alphabetically after defining
-APPLICATIONS = [
-    "PFAS destruction",
-    "CO2 conversion",
-    "Waste-to-Energy",
-    "NOx production",
-    "Hydrogen production",
-    "Carbon black production",
-    "Mining waste",
-    "Reentry",
-    "Propulsion",
-    "Methane reforming",
-    "Communication",
-    "Ultrasonic",
-    "Nitrification",
-    "Surface treatment",
-]
-APPLICATIONS = sorted(APPLICATIONS)
+# Full application list (alphabetical)
+APPLICATIONS = sorted(
+    [
+        "Carbon black production",
+        "CO2 conversion",
+        "Communication",
+        "Hydrogen production",
+        "Methane reforming",
+        "Mining waste",
+        "Nitrification",
+        "NOx production",
+        "PFAS destruction",
+        "Propulsion",
+        "Reentry",
+        "Surface treatment",
+        "Ultrasonic",
+        "Waste-to-Energy",
+    ]
+)
 
 PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
 
@@ -136,7 +136,6 @@ def check_login_two_factor_telegram():
 # -------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
-    # We keep images dir for backwards compatibility, even if we no longer use photos
     os.makedirs("data/images", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -169,8 +168,7 @@ def init_db(conn: sqlite3.Connection):
           gender TEXT,
           application TEXT,
           product_interest TEXT,
-          photo TEXT,
-          linkedin_url TEXT
+          photo TEXT
         );
 
         CREATE TABLE IF NOT EXISTS notes (
@@ -193,12 +191,23 @@ def init_db(conn: sqlite3.Connection):
         """
     )
 
-    # In case the DB was created before linkedin_url was added
+    # Ensure profile_url column exists; migrate old linkedin_url if present
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(contacts)")
     cols = [row[1] for row in cur.fetchall()]
-    if "linkedin_url" not in cols:
-        cur.execute("ALTER TABLE contacts ADD COLUMN linkedin_url TEXT")
+
+    if "profile_url" not in cols:
+        cur.execute("ALTER TABLE contacts ADD COLUMN profile_url TEXT")
+
+    # If there is an old linkedin_url column, copy its values into profile_url
+    if "linkedin_url" in cols:
+        cur.execute(
+            """
+            UPDATE contacts
+            SET profile_url = COALESCE(profile_url, linkedin_url)
+            WHERE linkedin_url IS NOT NULL
+            """
+        )
 
     conn.commit()
 
@@ -261,11 +270,15 @@ COLMAP = {
     "pipeline": "status",
     "stage": "status",
     "photo": "photo",
-    "linkedin": "linkedin_url",
-    "linkedin url": "linkedin_url",
-    "linkedin_url": "linkedin_url",
-    "linkedin profile": "linkedin_url",
-    "linkedin profile url": "linkedin_url",
+    # various ways people might name the profile link column
+    "linkedin": "profile_url",
+    "linkedin url": "profile_url",
+    "linkedin_url": "profile_url",
+    "linkedin profile": "profile_url",
+    "linkedin profile url": "profile_url",
+    "profile": "profile_url",
+    "profile url": "profile_url",
+    "profile link": "profile_url",
 }
 
 EXPECTED = [
@@ -289,7 +302,7 @@ EXPECTED = [
     "product_interest",
     "status",
     "photo",
-    "linkedin_url",
+    "profile_url",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
@@ -367,19 +380,18 @@ def normalize_application(val: Any) -> Optional[str]:
     if not s:
         return None
 
-    # Exact match to one of our known labels
+    # exact match first
     for app in APPLICATIONS:
         if s == app.lower():
             return app
 
-    # Keyword-based mapping
+    # fuzzy mapping
     if "pfas" in s:
         return "PFAS destruction"
     if "co2" in s or "carbon dioxide" in s:
         return "CO2 conversion"
     if "waste" in s or "gasification" in s or "rdf" in s:
         return "Waste-to-Energy"
-    # Treat "nitrification" as its own vertical, separate from generic NOx
     if "nitrification" in s:
         return "Nitrification"
     if "nox" in s or "nitric" in s or "nitrate" in s:
@@ -396,11 +408,11 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Propulsion"
     if "methane" in s or "reforming" in s or "steam reforming" in s:
         return "Methane reforming"
-    if "communication" in s or "telecom" in s or "rf link" in s:
+    if "communicat" in s:
         return "Communication"
-    if "ultrasonic" in s or "ultrasound" in s or "acoustic" in s:
+    if "ultrasonic" in s or "acoustic" in s:
         return "Ultrasonic"
-    if "surface treatment" in s or "coating" in s or "etch" in s:
+    if "surface" in s and "treat" in s:
         return "Surface treatment"
 
     return None
@@ -452,6 +464,7 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         "last_touch",
         "notes",
         "photo",
+        "profile_url",
     }
 
     score = sum(1 for v in first_vals_lower if v in known)
@@ -498,7 +511,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         status_from_file = r.get("status_norm")
         note_text = (r.get("notes") or "").strip()
         photo_path = (r.get("photo") or "").strip() or None
-        linkedin_url = (r.get("linkedin_url") or "").strip() or None
+        profile_url = (r.get("profile_url") or "").strip() or None
 
         if email:
             cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,))
@@ -556,7 +569,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 UPDATE contacts SET
                     scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
                     street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
-                    category=?, status=?, gender=?, application=?, product_interest=?, photo=?, linkedin_url=?
+                    category=?, status=?, gender=?, application=?, product_interest=?, photo=?, profile_url=?
                 WHERE id=?
                 """,
                 payload_common
@@ -566,7 +579,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     application,
                     product_interest,
                     photo_path,
-                    linkedin_url,
+                    profile_url,
                     existing_id,
                 ),
             )
@@ -577,8 +590,8 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 INSERT INTO contacts
                 (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
                  city, state, country, phone, email, website, category, status, gender, application,
-                 product_interest, photo, linkedin_url)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 product_interest, photo, profile_url)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 payload_common
                 + (
@@ -587,7 +600,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     application,
                     product_interest,
                     photo_path,
-                    linkedin_url,
+                    profile_url,
                 ),
             )
             contact_id = cur.lastrowid
@@ -747,7 +760,7 @@ def show_priority_lists(conn: sqlite3.Connection):
     st.subheader("Customer overview")
 
     df_all = pd.read_sql_query(
-        "SELECT id, first_name, last_name, company, email, status FROM contacts",
+        "SELECT id, first_name, last_name, company, email, status, profile_url FROM contacts",
         conn,
     )
 
@@ -758,11 +771,12 @@ def show_priority_lists(conn: sqlite3.Connection):
     def build_group(mask):
         sub = df_all[mask].copy()
         if sub.empty:
-            return sub, pd.DataFrame(columns=["Name", "Company", "Email", "Status"])
+            return sub, pd.DataFrame(columns=["Profile", "Name", "Company", "Email", "Status"])
         sub["Name"] = (
             sub["first_name"].fillna("") + " " + sub["last_name"].fillna("")
         ).str.strip()
-        display = sub[["Name", "company", "email", "status"]].rename(
+        sub["Profile"] = sub["profile_url"]
+        display = sub[["Profile", "Name", "company", "email", "status"]].rename(
             columns={"company": "Company", "email": "Email", "status": "Status"}
         )
         return sub, display
@@ -791,7 +805,18 @@ def show_priority_lists(conn: sqlite3.Connection):
         if hot_df.empty:
             st.caption("No leads in this group.")
         else:
-            st.dataframe(hot_df, hide_index=True, use_container_width=True)
+            st.dataframe(
+                hot_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Profile": st.column_config.LinkColumn(
+                        " ",
+                        help="Open profile link",
+                        display_text="📌",
+                    )
+                },
+            )
 
             hot_options = {
                 int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
@@ -849,7 +874,18 @@ def show_priority_lists(conn: sqlite3.Connection):
         if pot_df.empty:
             st.caption("No leads in this group.")
         else:
-            st.dataframe(pot_df, hide_index=True, use_container_width=True)
+            st.dataframe(
+                pot_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Profile": st.column_config.LinkColumn(
+                        " ",
+                        help="Open profile link",
+                        display_text="📌",
+                    )
+                },
+            )
 
             pot_options = {
                 int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
@@ -894,7 +930,18 @@ def show_priority_lists(conn: sqlite3.Connection):
         if cold_df.empty:
             st.caption("No leads in this group.")
         else:
-            st.dataframe(cold_df, hide_index=True, use_container_width=True)
+            st.dataframe(
+                cold_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Profile": st.column_config.LinkColumn(
+                        " ",
+                        help="Open profile link",
+                        display_text="📌",
+                    )
+                },
+            )
 
             cold_options = {
                 int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
@@ -975,23 +1022,22 @@ def filters_ui():
 
 
 # -------------------------------------------------------------
-# CONTACT EDITOR (no photo UI, LinkedIn link only)
+# CONTACT EDITOR + NOTES
 # -------------------------------------------------------------
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
 
     contact_id = int(row["id"])
 
-    name = f"{row['first_name']} {row['last_name']}".strip()
-    company = row.get("company") or ""
-    st.markdown(f"### ✏️ {name} — {company}")
+    st.markdown(
+        f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
+    )
     st.caption(
         f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
     )
-
-    linkedin_url_header = row.get("linkedin_url")
-    if linkedin_url_header:
-        st.markdown(f"🔗 LinkedIn: [{linkedin_url_header}]({linkedin_url_header})")
+    profile_header_url = row.get("profile_url")
+    if profile_header_url:
+        st.markdown(f"🔗 Profile: [{profile_header_url}]({profile_header_url})")
 
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
@@ -1061,7 +1107,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         zipc = st.text_input("ZIP", row["zip_code"] or "")
         country = st.text_input("Country", row["country"] or "")
         website = st.text_input("Website", row["website"] or "")
-        linkedin = st.text_input("LinkedIn URL", row.get("linkedin_url") or "")
+        profile_url = st.text_input("Profile URL", row.get("profile_url") or "")
 
         col_save, col_delete = st.columns([3, 1])
         with col_save:
@@ -1081,7 +1127,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 UPDATE contacts SET
                     first_name=?, last_name=?, job_title=?, company=?, phone=?, email=?,
                     category=?, status=?, owner=?, street=?, street2=?, city=?, state=?,
-                    zip_code=?, country=?, website=?, linkedin_url=?, last_touch=?, gender=?, application=?, product_interest=?
+                    zip_code=?, country=?, website=?, profile_url=?, last_touch=?, gender=?, application=?, product_interest=?
                 WHERE id=?
                 """,
                 (
@@ -1101,7 +1147,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     zipc or None,
                     country or None,
                     website or None,
-                    (linkedin or "").strip() or None,
+                    (profile_url or "").strip() or None,
                     datetime.utcnow().isoformat(),
                     gender or None,
                     normalize_application(application),
@@ -1121,17 +1167,12 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.success("Contact deleted")
             st.rerun()
 
-    # LinkedIn preview (no iframe because LinkedIn blocks embedding)
-    with st.expander("🔗 LinkedIn profile"):
-        linkedin_url = row.get("linkedin_url")
-        if linkedin_url:
-            st.markdown(f"[Open profile in new tab]({linkedin_url})")
-            st.caption(
-                "LinkedIn does not allow embedding profiles inside other sites, "
-                "so click the link above to view the profile."
-            )
+    with st.expander("🔗 Profile link"):
+        profile_url = row.get("profile_url")
+        if profile_url:
+            st.markdown(f"[Open profile in new tab]({profile_url})")
         else:
-            st.caption("No LinkedIn URL saved for this contact.")
+            st.caption("No profile URL saved for this contact.")
 
     st.markdown("#### 🗒️ Notes")
     note_key = f"note_{contact_id}"
@@ -1240,7 +1281,7 @@ def add_contact_form(conn: sqlite3.Connection):
             zipc = st.text_input("ZIP", key="add_zip")
             country = st.text_input("Country", key="add_country")
             website = st.text_input("Website", key="add_website")
-            linkedin = st.text_input("LinkedIn URL", key="add_linkedin")
+            profile_url = st.text_input("Profile URL", key="add_profile_url")
 
             col_create, col_clear = st.columns([3, 1])
             with col_create:
@@ -1264,9 +1305,9 @@ def add_contact_form(conn: sqlite3.Connection):
                         INSERT INTO contacts
                         (scan_datetime, first_name, last_name, job_title, company,
                          street, street2, zip_code, city, state, country,
-                         phone, email, website, linkedin_url, category, status, owner, last_touch,
+                         phone, email, website, profile_url, category, status, owner, last_touch,
                          gender, application, product_interest)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             scan_dt,
@@ -1283,7 +1324,7 @@ def add_contact_form(conn: sqlite3.Connection):
                             phone or None,
                             email_norm,
                             website or None,
-                            (linkedin or "").strip() or None,
+                            (profile_url or "").strip() or None,
                             category,
                             status_norm,
                             owner or None,
@@ -1319,7 +1360,7 @@ def add_contact_form(conn: sqlite3.Connection):
                     "add_zip",
                     "add_country",
                     "add_website",
-                    "add_linkedin",
+                    "add_profile_url",
                 ]:
                     st.session_state.pop(key, None)
                 st.rerun()
@@ -1366,7 +1407,7 @@ def main():
         )
         return
 
-    # Export: remove photo, keep linkedin_url
+    # Export: no photo column, but include profile_url
     export_cols = [
         "first_name",
         "last_name",
@@ -1385,7 +1426,7 @@ def main():
         "product_interest",
         "last_touch",
         "notes",
-        "linkedin_url",
+        "profile_url",
     ]
     available_cols = [c for c in export_cols if c in df.columns]
     st.session_state["export_df"] = df[available_cols].copy()
