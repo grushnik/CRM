@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 import requests
+import streamlit.components.v1 as components
 
 # -------------------------------------------------------------
 # BASIC CONFIG
@@ -183,6 +184,14 @@ def init_db(conn: sqlite3.Connection):
         );
         """
     )
+
+    # Ensure linkedin_url column exists
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(contacts)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "linkedin_url" not in cols:
+        cur.execute("ALTER TABLE contacts ADD COLUMN linkedin_url TEXT")
+
     conn.commit()
 
 
@@ -244,6 +253,11 @@ COLMAP = {
     "pipeline": "status",
     "stage": "status",
     "photo": "photo",
+    "linkedin": "linkedin_url",
+    "linkedin url": "linkedin_url",
+    "linkedin_url": "linkedin_url",
+    "linkedin profile": "linkedin_url",
+    "linkedin profile url": "linkedin_url",
 }
 
 EXPECTED = [
@@ -267,6 +281,7 @@ EXPECTED = [
     "product_interest",
     "status",
     "photo",
+    "linkedin_url",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
@@ -464,6 +479,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         status_from_file = r.get("status_norm")
         note_text = (r.get("notes") or "").strip()
         photo_path = (r.get("photo") or "").strip() or None
+        linkedin_url = (r.get("linkedin_url") or "").strip() or None
 
         if email:
             cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,))
@@ -509,14 +525,19 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     INSERT INTO status_history(contact_id, ts, old_status, new_status)
                     VALUES (?,?,?,?)
                     """,
-                    (existing_id, datetime.utcnow().isoformat(), existing_status, final_status),
+                    (
+                        existing_id,
+                        datetime.utcnow().isoformat(),
+                        existing_status,
+                        final_status,
+                    ),
                 )
             cur.execute(
                 """
                 UPDATE contacts SET
                     scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
                     street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
-                    category=?, status=?, gender=?, application=?, product_interest=?, photo=?
+                    category=?, status=?, gender=?, application=?, product_interest=?, photo=?, linkedin_url=?
                 WHERE id=?
                 """,
                 payload_common
@@ -526,6 +547,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     application,
                     product_interest,
                     photo_path,
+                    linkedin_url,
                     existing_id,
                 ),
             )
@@ -535,8 +557,9 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 """
                 INSERT INTO contacts
                 (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
-                 city, state, country, phone, email, website, category, status, gender, application, product_interest, photo)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 city, state, country, phone, email, website, category, status, gender, application,
+                 product_interest, photo, linkedin_url)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 payload_common
                 + (
@@ -545,6 +568,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     application,
                     product_interest,
                     photo_path,
+                    linkedin_url,
                 ),
             )
             contact_id = cur.lastrowid
@@ -964,6 +988,9 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         st.caption(
             f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
         )
+        linkedin_url_header = row.get("linkedin_url")
+        if linkedin_url_header:
+            st.markdown(f"🔗 LinkedIn: [{linkedin_url_header}]({linkedin_url_header})")
 
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
@@ -1033,6 +1060,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         zipc = st.text_input("ZIP", row["zip_code"] or "")
         country = st.text_input("Country", row["country"] or "")
         website = st.text_input("Website", row["website"] or "")
+        linkedin = st.text_input("LinkedIn URL", row.get("linkedin_url") or "")
 
         col_save, col_delete = st.columns([3, 1])
         with col_save:
@@ -1052,7 +1080,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 UPDATE contacts SET
                     first_name=?, last_name=?, job_title=?, company=?, phone=?, email=?,
                     category=?, status=?, owner=?, street=?, street2=?, city=?, state=?,
-                    zip_code=?, country=?, website=?, last_touch=?, gender=?, application=?, product_interest=?
+                    zip_code=?, country=?, website=?, linkedin_url=?, last_touch=?, gender=?, application=?, product_interest=?
                 WHERE id=?
                 """,
                 (
@@ -1072,6 +1100,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     zipc or None,
                     country or None,
                     website or None,
+                    (linkedin or "").strip() or None,
                     datetime.utcnow().isoformat(),
                     gender or None,
                     normalize_application(application),
@@ -1109,6 +1138,20 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             backup_contacts(conn)
             st.success("Photo saved")
             st.rerun()
+
+    linkedin_url = row.get("linkedin_url")
+    with st.expander("🔗 LinkedIn profile preview"):
+        if linkedin_url:
+            st.markdown(f"[Open profile in new tab]({linkedin_url})")
+            iframe_html = f'''
+                <iframe src="{linkedin_url}"
+                        style="width:100%;height:500px;border:none;"
+                        sandbox="allow-same-origin allow-scripts allow-popups allow-forms">
+                </iframe>
+            '''
+            components.html(iframe_html, height=520)
+        else:
+            st.caption("No LinkedIn URL saved for this contact.")
 
     st.markdown("#### 🗒️ Notes")
     note_key = f"note_{contact_id}"
@@ -1217,6 +1260,7 @@ def add_contact_form(conn: sqlite3.Connection):
             zipc = st.text_input("ZIP", key="add_zip")
             country = st.text_input("Country", key="add_country")
             website = st.text_input("Website", key="add_website")
+            linkedin = st.text_input("LinkedIn URL", key="add_linkedin")
 
             col_create, col_clear = st.columns([3, 1])
             with col_create:
@@ -1240,9 +1284,9 @@ def add_contact_form(conn: sqlite3.Connection):
                         INSERT INTO contacts
                         (scan_datetime, first_name, last_name, job_title, company,
                          street, street2, zip_code, city, state, country,
-                         phone, email, website, category, status, owner, last_touch,
+                         phone, email, website, linkedin_url, category, status, owner, last_touch,
                          gender, application, product_interest)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             scan_dt,
@@ -1259,6 +1303,7 @@ def add_contact_form(conn: sqlite3.Connection):
                             phone or None,
                             email_norm,
                             website or None,
+                            (linkedin or "").strip() or None,
                             category,
                             status_norm,
                             owner or None,
@@ -1294,6 +1339,7 @@ def add_contact_form(conn: sqlite3.Connection):
                     "add_zip",
                     "add_country",
                     "add_website",
+                    "add_linkedin",
                 ]:
                     st.session_state.pop(key, None)
                 st.rerun()
@@ -1359,6 +1405,7 @@ def main():
         "last_touch",
         "notes",
         "photo",
+        "linkedin_url",
     ]
     available_cols = [c for c in export_cols if c in df.columns]
     st.session_state["export_df"] = df[available_cols].copy()
