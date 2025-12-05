@@ -10,7 +10,6 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 import requests
-import streamlit.components.v1 as components
 
 # -------------------------------------------------------------
 # BASIC CONFIG
@@ -22,20 +21,22 @@ BACKUP_FILE = "data/contacts_backup.csv"
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
 
+# Applications in alphabetical order
 APPLICATIONS = [
-    "PFAS destruction",
-    "CO2 conversion",
-    "Waste-to-Energy",
-    "NOx production",
-    "Hydrogen production",
     "Carbon black production",
-    "Mining waste",
-    "Reentry",
-    "Propulsion",
-    "Methane reforming",
+    "CO2 conversion",
     "Communication",
-    "Ultrasonic",
+    "Hydrogen production",
+    "Methane reforming",
+    "Mining waste",
     "Nitrification",
+    "NOx production",
+    "PFAS destruction",
+    "Propulsion",
+    "Reentry",
+    "Surface treatment",
+    "Ultrasonic",
+    "Waste-to-Energy",
 ]
 
 PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
@@ -374,7 +375,6 @@ def normalize_application(val: Any) -> Optional[str]:
         return "CO2 conversion"
     if "waste" in s or "gasification" in s or "rdf" in s:
         return "Waste-to-Energy"
-    # 'nitrification' now maps to Nitrification (separate from NOx)
     if "nitrification" in s:
         return "Nitrification"
     if "nox" in s or "nitric" in s or "nitrate" in s:
@@ -395,6 +395,8 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Communication"
     if "ultrasonic" in s:
         return "Ultrasonic"
+    if "surface" in s and "treat" in s:
+        return "Surface treatment"
 
     return None
 
@@ -404,15 +406,11 @@ def normalize_application(val: Any) -> Optional[str]:
 # -------------------------------------------------------------
 def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Some files (like Book2.xlsx) have all columns named 'Unnamed: x'
-    and the *first data row* actually contains the header names:
-    [NaN, 'first_name', 'last_name', 'email', ...].
-
-    This function detects that pattern and promotes row 0 to header.
+    Some files have all columns named 'Unnamed: x'
+    and the first data row actually contains header names.
     """
     cols_lower = [str(c).strip().lower() for c in df.columns]
 
-    # If we already have 'first_name' or 'first name' as a column, nothing to do.
     if "first_name" in cols_lower or "first name" in cols_lower:
         return df
 
@@ -449,7 +447,6 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
 
     score = sum(1 for v in first_vals_lower if v in known)
 
-    # Heuristic: if we see at least 3 known header names in row 0, treat it as header.
     if score >= 3:
         new_cols = []
         for i, val in enumerate(first_vals_lower):
@@ -460,7 +457,6 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
         df.columns = new_cols
 
-        # Drop completely empty 'extra_*' columns
         for c in list(df.columns):
             if c.startswith("extra_") and df[c].isna().all():
                 df = df.drop(columns=[c])
@@ -798,7 +794,6 @@ def show_priority_lists(conn: sqlite3.Connection):
             )
             c_hot1, c_hot2 = st.columns(2)
             with c_hot1:
-                # Hot -> Potential
                 if st.button("Move to Potential", key="btn_hot_to_pot"):
                     cur = conn.cursor()
                     cur.execute(
@@ -814,7 +809,6 @@ def show_priority_lists(conn: sqlite3.Connection):
                     update_contact_status(conn, selected_hot, new_status)
                     st.rerun()
             with c_hot2:
-                # Hot -> Cold
                 if st.button("Move to Cold", key="btn_hot_to_cold"):
                     cur = conn.cursor()
                     cur.execute(
@@ -856,12 +850,10 @@ def show_priority_lists(conn: sqlite3.Connection):
             )
             c_pot1, c_pot2 = st.columns(2)
             with c_pot1:
-                # Potential -> Hot (always Meeting)
                 if st.button("Move to Hot", key="btn_pot_to_hot"):
                     update_contact_status(conn, selected_pot, "Meeting")
                     st.rerun()
             with c_pot2:
-                # Potential -> Cold (New -> Irrelevant, Contacted -> Pending)
                 if st.button("Move to Cold", key="btn_pot_to_cold"):
                     cur = conn.cursor()
                     cur.execute(
@@ -903,12 +895,10 @@ def show_priority_lists(conn: sqlite3.Connection):
             )
             c_cold1, c_cold2 = st.columns(2)
             with c_cold1:
-                # Cold -> Potential: Contacted
                 if st.button("Move to Potential", key="btn_cold_to_pot"):
                     update_contact_status(conn, selected_cold, "Contacted")
                     st.rerun()
             with c_cold2:
-                # Cold -> Hot: Meeting
                 if st.button("Move to Hot", key="btn_cold_to_hot"):
                     update_contact_status(conn, selected_cold, "Meeting")
                     st.rerun()
@@ -970,41 +960,22 @@ def filters_ui():
 
 
 # -------------------------------------------------------------
-# PHOTO + NOTES + EDITOR
+# CONTACT EDITOR (no photo UI, simple LinkedIn link)
 # -------------------------------------------------------------
-def save_photo(contact_id: int, uploaded_file) -> str:
-    ext = os.path.splitext(uploaded_file.name)[1].lower()
-    if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
-        ext = ".png"
-    path = f"data/images/{contact_id}{ext}"
-    with open(path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    return path
-
-
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
 
     contact_id = int(row["id"])
 
-    col_img, col_txt = st.columns([1, 4])
-    with col_img:
-        ph_path = row.get("photo")
-        if ph_path and os.path.exists(ph_path):
-            st.image(ph_path, width=120)
-        else:
-            st.caption("No photo")
-
-    with col_txt:
-        st.markdown(
-            f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
-        )
-        st.caption(
-            f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
-        )
-        linkedin_url_header = row.get("linkedin_url")
-        if linkedin_url_header:
-            st.markdown(f"🔗 LinkedIn: [{linkedin_url_header}]({linkedin_url_header})")
+    st.markdown(
+        f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
+    )
+    st.caption(
+        f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
+    )
+    linkedin_url_header = row.get("linkedin_url")
+    if linkedin_url_header:
+        st.markdown(f"🔗 LinkedIn: [{linkedin_url_header}]({linkedin_url_header})")
 
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
@@ -1020,434 +991,4 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
             gender = st.selectbox(
                 "Gender",
-                gender_options,
-                index=gender_index,
-            )
-        with col2:
-            last = st.text_input("Last name", row["last_name"] or "")
-            company = st.text_input("Company", row["company"] or "")
-            email = st.text_input("Email", row["email"] or "")
-            app_options = [""] + APPLICATIONS
-            current_app = row["application"] or ""
-            app_index = app_options.index(current_app) if current_app in app_options else 0
-            application = st.selectbox("Application", app_options, index=app_index)
-        with col3:
-            cat_opts = [
-                "PhD/Student",
-                "Professor/Academic",
-                "Academic",
-                "Industry",
-                "Other",
-            ]
-            category = st.selectbox(
-                "Category",
-                cat_opts,
-                index=cat_opts.index(row["category"])
-                if row["category"] in cat_opts
-                else 0,
-            )
-            status = st.selectbox(
-                "Status",
-                PIPELINE,
-                index=PIPELINE.index(row["status"])
-                if row["status"] in PIPELINE
-                else 0,
-            )
-
-            product_options = [""] + PRODUCTS
-            raw_prod = row["product_interest"] or ""
-            current_prod = raw_prod if raw_prod in product_options else ""
-            prod_index = product_options.index(current_prod)
-
-            owner = st.text_input("Owner", row["owner"] or "")
-            product = st.selectbox(
-                "Product type interest",
-                product_options,
-                index=prod_index,
-            )
-
-        st.write("**Address**")
-        street = st.text_input("Street", row["street"] or "")
-        street2 = st.text_input("Street 2", row["street2"] or "")
-        city = st.text_input("City", row["city"] or "")
-        state = st.text_input("State/Province", row["state"] or "")
-        zipc = st.text_input("ZIP", row["zip_code"] or "")
-        country = st.text_input("Country", row["country"] or "")
-        website = st.text_input("Website", row["website"] or "")
-        linkedin = st.text_input("LinkedIn URL", row.get("linkedin_url") or "")
-
-        col_save, col_delete = st.columns([3, 1])
-        with col_save:
-            saved = st.form_submit_button("Save changes")
-        with col_delete:
-            delete_pressed = st.form_submit_button("🗑️ Delete this contact")
-
-        if saved:
-            cur = conn.cursor()
-            if row["status"] != status:
-                cur.execute(
-                    "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
-                    (contact_id, datetime.utcnow().isoformat(), row["status"], status),
-                )
-            conn.execute(
-                """
-                UPDATE contacts SET
-                    first_name=?, last_name=?, job_title=?, company=?, phone=?, email=?,
-                    category=?, status=?, owner=?, street=?, street2=?, city=?, state=?,
-                    zip_code=?, country=?, website=?, linkedin_url=?, last_touch=?, gender=?, application=?, product_interest=?
-                WHERE id=?
-                """,
-                (
-                    first,
-                    last,
-                    job,
-                    company,
-                    phone or None,
-                    (email or "").lower().strip() or None,
-                    category,
-                    status,
-                    owner or None,
-                    street or None,
-                    street2 or None,
-                    city or None,
-                    state or None,
-                    zipc or None,
-                    country or None,
-                    website or None,
-                    (linkedin or "").strip() or None,
-                    datetime.utcnow().isoformat(),
-                    gender or None,
-                    normalize_application(application),
-                    product or None,
-                    contact_id,
-                ),
-            )
-            conn.commit()
-            backup_contacts(conn)
-            st.success("Saved")
-            st.rerun()
-
-        if delete_pressed:
-            conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
-            conn.commit()
-            backup_contacts(conn)
-            st.success("Contact deleted")
-            st.rerun()
-
-    with st.expander("📷 Photo"):
-        ph_path = row.get("photo")
-        if ph_path and os.path.exists(ph_path):
-            st.image(ph_path, width=160)
-        up = st.file_uploader(
-            "Upload/replace photo",
-            type=["png", "jpg", "jpeg", "webp"],
-            key=f"photo_{contact_id}",
-        )
-        if up is not None:
-            saved_path = save_photo(contact_id, up)
-            conn.execute(
-                "UPDATE contacts SET photo=? WHERE id=?", (saved_path, contact_id)
-            )
-            conn.commit()
-            backup_contacts(conn)
-            st.success("Photo saved")
-            st.rerun()
-
-    linkedin_url = row.get("linkedin_url")
-    with st.expander("🔗 LinkedIn profile preview"):
-        if linkedin_url:
-            st.markdown(f"[Open profile in new tab]({linkedin_url})")
-            iframe_html = f'''
-                <iframe src="{linkedin_url}"
-                        style="width:100%;height:500px;border:none;"
-                        sandbox="allow-same-origin allow-scripts allow-popups allow-forms">
-                </iframe>
-            '''
-            components.html(iframe_html, height=520)
-        else:
-            st.caption("No LinkedIn URL saved for this contact.")
-
-    st.markdown("#### 🗒️ Notes")
-    note_key = f"note_{contact_id}"
-    fu_key = f"nextfu_{contact_id}"
-
-    new_note = st.text_area(
-        "Add a note",
-        key=note_key,
-        placeholder="Called; left voicemail…",
-    )
-    next_fu = st.date_input(
-        "Next follow-up",
-        value=st.session_state.get(fu_key, date.today()),
-        key=fu_key,
-    )
-
-    col_add_note, col_clear_note = st.columns([2, 1])
-    with col_add_note:
-        if st.button("Add note", key=f"addnote_{contact_id}"):
-            if new_note.strip():
-                ts_iso = datetime.utcnow().isoformat()
-                fu_iso = next_fu.isoformat() if isinstance(next_fu, date) else None
-                conn.execute(
-                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (contact_id, ts_iso, new_note.strip(), fu_iso),
-                )
-                conn.execute(
-                    "UPDATE contacts SET last_touch=? WHERE id=?",
-                    (ts_iso, contact_id),
-                )
-                conn.commit()
-                backup_contacts(conn)
-                st.session_state.pop(note_key, None)
-                st.session_state.pop(fu_key, None)
-                st.success("Note added")
-                st.rerun()
-    with col_clear_note:
-        if st.button("Clear note", key=f"clearnote_{contact_id}"):
-            st.session_state.pop(note_key, None)
-            st.session_state.pop(fu_key, None)
-            st.rerun()
-
-    notes_df = get_notes(conn, contact_id)
-    st.dataframe(notes_df, use_container_width=True)
-
-
-# -------------------------------------------------------------
-# MANUAL ADD CONTACT FORM
-# -------------------------------------------------------------
-def add_contact_form(conn: sqlite3.Connection):
-    st.markdown("### ➕ Add new contact manually")
-
-    with st.expander("Open form"):
-        with st.form("add_contact_form"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                first = st.text_input("First name", key="add_first")
-                job = st.text_input("Job title", key="add_job")
-                phone = st.text_input("Phone", key="add_phone")
-                gender = st.selectbox(
-                    "Gender",
-                    ["", "Female", "Male", "Other"],
-                    key="add_gender",
-                )
-            with col2:
-                last = st.text_input("Last name", key="add_last")
-                company = st.text_input("Company", key="add_company")
-                email = st.text_input("Email", key="add_email")
-                application_raw = st.selectbox(
-                    "Application",
-                    [""] + APPLICATIONS,
-                    key="add_application",
-                )
-            with col3:
-                cat_opts = [
-                    "PhD/Student",
-                    "Professor/Academic",
-                    "Academic",
-                    "Industry",
-                    "Other",
-                ]
-                category = st.selectbox(
-                    "Category",
-                    cat_opts,
-                    index=3,
-                    key="add_category",
-                )
-                status = st.selectbox(
-                    "Status",
-                    PIPELINE,
-                    index=0,
-                    key="add_status",
-                )
-                owner = st.text_input("Owner", key="add_owner")
-                product = st.selectbox(
-                    "Product type interest",
-                    [""] + PRODUCTS,
-                    key="add_product",
-                )
-
-            st.write("**Address**")
-            street = st.text_input("Street", key="add_street")
-            street2 = st.text_input("Street 2", key="add_street2")
-            city = st.text_input("City", key="add_city")
-            state = st.text_input("State/Province", key="add_state")
-            zipc = st.text_input("ZIP", key="add_zip")
-            country = st.text_input("Country", key="add_country")
-            website = st.text_input("Website", key="add_website")
-            linkedin = st.text_input("LinkedIn URL", key="add_linkedin")
-
-            col_create, col_clear = st.columns([3, 1])
-            with col_create:
-                submitted = st.form_submit_button("Create contact")
-            with col_clear:
-                clear = st.form_submit_button("Clear form")
-
-            if submitted:
-                if not email and not (first and last and company):
-                    st.error(
-                        "Please provide either an email, or first name + last name + company."
-                    )
-                else:
-                    scan_dt = datetime.utcnow().isoformat()
-                    email_norm = (email or "").strip().lower() or None
-                    status_norm = normalize_status(status) or "New"
-                    application_norm = normalize_application(application_raw)
-
-                    conn.execute(
-                        """
-                        INSERT INTO contacts
-                        (scan_datetime, first_name, last_name, job_title, company,
-                         street, street2, zip_code, city, state, country,
-                         phone, email, website, linkedin_url, category, status, owner, last_touch,
-                         gender, application, product_interest)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            scan_dt,
-                            first or None,
-                            last or None,
-                            job or None,
-                            company or None,
-                            street or None,
-                            street2 or None,
-                            zipc or None,
-                            city or None,
-                            state or None,
-                            country or None,
-                            phone or None,
-                            email_norm,
-                            website or None,
-                            (linkedin or "").strip() or None,
-                            category,
-                            status_norm,
-                            owner or None,
-                            scan_dt,
-                            gender or None,
-                            application_norm,
-                            product or None,
-                        ),
-                    )
-                    conn.commit()
-                    backup_contacts(conn)
-                    st.success("New contact created")
-                    st.rerun()
-
-            if clear:
-                for key in [
-                    "add_first",
-                    "add_job",
-                    "add_phone",
-                    "add_gender",
-                    "add_last",
-                    "add_company",
-                    "add_email",
-                    "add_application",
-                    "add_category",
-                    "add_status",
-                    "add_owner",
-                    "add_product",
-                    "add_street",
-                    "add_street2",
-                    "add_city",
-                    "add_state",
-                    "add_zip",
-                    "add_country",
-                    "add_website",
-                    "add_linkedin",
-                ]:
-                    st.session_state.pop(key, None)
-                st.rerun()
-
-
-# -------------------------------------------------------------
-# MAIN APP
-# -------------------------------------------------------------
-def main():
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
-    check_login_two_factor_telegram()
-
-    conn = get_conn()
-    init_db(conn)
-    restore_from_backup_if_empty(conn)
-
-    top_l, top_r = st.columns([3, 1])
-    with top_l:
-        st.title(APP_TITLE)
-        st.caption("Upload leads → categorize → work the pipeline → export.")
-    with top_r:
-        show_won_counter(conn)
-
-    sidebar_import_export(conn)
-
-    show_priority_lists(conn)
-
-    add_contact_form(conn)
-
-    q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
-    df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
-
-    notes_agg = get_notes_agg(conn)
-    if not notes_agg.empty:
-        df = df.merge(notes_agg, how="left", left_on="id", right_on="contact_id")
-        df.drop(columns=["contact_id"], inplace=True, errors="ignore")
-    if "notes" not in df.columns:
-        df["notes"] = None
-
-    if df.empty:
-        st.info(
-            "No contacts match your filters or the database is empty. "
-            "Add a contact with the form above or upload an Excel/CSV in the sidebar."
-        )
-        return
-
-    # Export columns: photo REMOVED from download file
-    export_cols = [
-        "first_name",
-        "last_name",
-        "email",
-        "phone",
-        "job_title",
-        "company",
-        "city",
-        "state",
-        "country",
-        "category",
-        "status",
-        "owner",
-        "gender",
-        "application",
-        "product_interest",
-        "last_touch",
-        "notes",
-        "linkedin_url",
-    ]
-    available_cols = [c for c in export_cols if c in df.columns]
-    st.session_state["export_df"] = df[available_cols].copy()
-
-    st.subheader("Contacts")
-    st.dataframe(df[available_cols], use_container_width=True, hide_index=True)
-
-    options = [
-        (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
-        for r in df[["id", "first_name", "last_name", "company"]].itertuples(
-            index=False
-        )
-    ]
-    if not options:
-        return
-
-    option_labels = {opt[0]: opt[1] for opt in options}
-
-    chosen_id = st.selectbox(
-        "Select a contact to edit",
-        [opt[0] for opt in options],
-        format_func=lambda x: option_labels.get(x, str(x)),
-    )
-
-    if chosen_id:
-        row = df[df["id"] == chosen_id].iloc[0]
-        contact_editor(conn, row)
-
-
-if __name__ == "__main__":
-    main()
+                gender_opti_
