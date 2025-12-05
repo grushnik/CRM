@@ -33,6 +33,9 @@ APPLICATIONS = [
     "Reentry",
     "Propulsion",
     "Methane reforming",
+    "Communication",
+    "Ultrasonic",
+    "Nitrification",
 ]
 
 PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
@@ -359,17 +362,22 @@ def normalize_application(val: Any) -> Optional[str]:
     if not s:
         return None
 
+    # Exact dropdown matches first
     for app in APPLICATIONS:
         if s == app.lower():
             return app
 
+    # Heuristics
     if "pfas" in s:
         return "PFAS destruction"
     if "co2" in s or "carbon dioxide" in s:
         return "CO2 conversion"
     if "waste" in s or "gasification" in s or "rdf" in s:
         return "Waste-to-Energy"
-    if "nox" in s or "nitric" in s or "nitrate" in s or "nitrification" in s:
+    # 'nitrification' now maps to Nitrification (separate from NOx)
+    if "nitrification" in s:
+        return "Nitrification"
+    if "nox" in s or "nitric" in s or "nitrate" in s:
         return "NOx production"
     if "hydrogen" in s or "h2" in s:
         return "Hydrogen production"
@@ -383,6 +391,10 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Propulsion"
     if "methane" in s or "reforming" in s or "steam reforming" in s:
         return "Methane reforming"
+    if "communication" in s or "telecom" in s:
+        return "Communication"
+    if "ultrasonic" in s:
+        return "Ultrasonic"
 
     return None
 
@@ -852,7 +864,9 @@ def show_priority_lists(conn: sqlite3.Connection):
                 # Potential -> Cold (New -> Irrelevant, Contacted -> Pending)
                 if st.button("Move to Cold", key="btn_pot_to_cold"):
                     cur = conn.cursor()
-                    cur.execute("SELECT status FROM contacts WHERE id=?", (selected_pot,))
+                    cur.execute(
+                        "SELECT status FROM contacts WHERE id=?", (selected_pot,)
+                    )
                     old = (cur.fetchone() or ["New"])[0]
                     if old == "New":
                         new_status = "Irrelevant"
@@ -1386,6 +1400,7 @@ def main():
         )
         return
 
+    # Export columns: photo REMOVED from download file
     export_cols = [
         "first_name",
         "last_name",
@@ -1404,7 +1419,6 @@ def main():
         "product_interest",
         "last_touch",
         "notes",
-        "photo",
         "linkedin_url",
     ]
     available_cols = [c for c in export_cols if c in df.columns]
