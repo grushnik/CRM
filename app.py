@@ -584,7 +584,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
                      city, state, country, phone, email, website, category, status, gender, application,
                      product_interest, photo, profile_url)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     payload_common
                     + (
@@ -1299,7 +1299,7 @@ def add_contact_form(conn: sqlite3.Connection):
                          street, street2, zip_code, city, state, country,
                          phone, email, website, profile_url, category, status, owner, last_touch,
                          gender, application, product_interest)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             scan_dt,
