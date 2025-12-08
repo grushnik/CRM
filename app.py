@@ -21,23 +21,23 @@ BACKUP_FILE = "data/contacts_backup.csv"
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
 
-# Full application list (alphabetical)
+# Raw application list, then sorted alphabetically for UI
 APPLICATIONS = sorted(
     [
-        "Carbon black production",
-        "CO2 conversion",
-        "Communication",
-        "Hydrogen production",
-        "Methane reforming",
-        "Mining waste",
-        "Nitrification",
-        "NOx production",
         "PFAS destruction",
-        "Propulsion",
-        "Reentry",
-        "Surface treatment",
-        "Ultrasonic",
+        "CO2 conversion",
         "Waste-to-Energy",
+        "NOx production",
+        "Hydrogen production",
+        "Carbon black production",
+        "Mining waste",
+        "Reentry",
+        "Propulsion",
+        "Methane reforming",
+        "Communication",
+        "Ultrasonic",
+        "Nitrification",
+        "Surface treatment",
     ]
 )
 
@@ -136,7 +136,6 @@ def check_login_two_factor_telegram():
 # -------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
-    os.makedirs("data/images", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
@@ -168,7 +167,8 @@ def init_db(conn: sqlite3.Connection):
           gender TEXT,
           application TEXT,
           product_interest TEXT,
-          photo TEXT
+          photo TEXT,
+          profile_url TEXT
         );
 
         CREATE TABLE IF NOT EXISTS notes (
@@ -191,23 +191,14 @@ def init_db(conn: sqlite3.Connection):
         """
     )
 
-    # Ensure profile_url column exists; migrate old linkedin_url if present
+    # Make sure new columns exist for older DBs
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(contacts)")
     cols = [row[1] for row in cur.fetchall()]
-
     if "profile_url" not in cols:
         cur.execute("ALTER TABLE contacts ADD COLUMN profile_url TEXT")
-
-    # If there is an old linkedin_url column, copy its values into profile_url
-    if "linkedin_url" in cols:
-        cur.execute(
-            """
-            UPDATE contacts
-            SET profile_url = COALESCE(profile_url, linkedin_url)
-            WHERE linkedin_url IS NOT NULL
-            """
-        )
+    if "photo" not in cols:
+        cur.execute("ALTER TABLE contacts ADD COLUMN photo TEXT")
 
     conn.commit()
 
@@ -270,7 +261,7 @@ COLMAP = {
     "pipeline": "status",
     "stage": "status",
     "photo": "photo",
-    # various ways people might name the profile link column
+    # various ways of naming profile links
     "linkedin": "profile_url",
     "linkedin url": "profile_url",
     "linkedin_url": "profile_url",
@@ -279,6 +270,7 @@ COLMAP = {
     "profile": "profile_url",
     "profile url": "profile_url",
     "profile link": "profile_url",
+    "profile_url": "profile_url",
 }
 
 EXPECTED = [
@@ -380,22 +372,22 @@ def normalize_application(val: Any) -> Optional[str]:
     if not s:
         return None
 
-    # exact match first
+    # exact match to list first
     for app in APPLICATIONS:
         if s == app.lower():
             return app
 
-    # fuzzy mapping
+    # keyword-based mapping
     if "pfas" in s:
         return "PFAS destruction"
     if "co2" in s or "carbon dioxide" in s:
         return "CO2 conversion"
     if "waste" in s or "gasification" in s or "rdf" in s:
         return "Waste-to-Energy"
-    if "nitrification" in s:
-        return "Nitrification"
     if "nox" in s or "nitric" in s or "nitrate" in s:
         return "NOx production"
+    if "nitrification" in s:
+        return "Nitrification"
     if "hydrogen" in s or "h2" in s:
         return "Hydrogen production"
     if "carbon black" in s or "soot" in s:
@@ -408,11 +400,11 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Propulsion"
     if "methane" in s or "reforming" in s or "steam reforming" in s:
         return "Methane reforming"
-    if "communicat" in s:
+    if "communication" in s:
         return "Communication"
-    if "ultrasonic" in s or "acoustic" in s:
+    if "ultrasonic" in s or "ultrasound" in s:
         return "Ultrasonic"
-    if "surface" in s and "treat" in s:
+    if "surface" in s and ("treat" in s or "coating" in s or "modify" in s):
         return "Surface treatment"
 
     return None
@@ -506,118 +498,126 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
     n = 0
     cur = conn.cursor()
-    for _, r in df.iterrows():
+    for idx, r in df.iterrows():
         email = r["email"].strip().lower() or None
         status_from_file = r.get("status_norm")
         note_text = (r.get("notes") or "").strip()
         photo_path = (r.get("photo") or "").strip() or None
         profile_url = (r.get("profile_url") or "").strip() or None
 
-        if email:
-            cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,))
-            row = cur.fetchone()
-        else:
-            cur.execute(
-                "SELECT id, status FROM contacts WHERE first_name=? AND last_name=? AND company=?",
-                (r["first_name"], r["last_name"], r["company"]),
+        try:
+            if email:
+                cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,))
+                row = cur.fetchone()
+            else:
+                cur.execute(
+                    "SELECT id, status FROM contacts WHERE first_name=? AND last_name=? AND company=?",
+                    (r["first_name"], r["last_name"], r["company"]),
+                )
+                row = cur.fetchone()
+
+            existing_id = row[0] if row else None
+            existing_status = row[1] if row and len(row) > 1 else None
+
+            final_status = status_from_file or existing_status or "New"
+
+            payload_common = (
+                r["scan_datetime"],
+                r["first_name"],
+                r["last_name"],
+                r["job_title"],
+                r["company"],
+                r["street"],
+                r["street2"],
+                r["zip_code"],
+                r["city"],
+                r["state"],
+                r["country"],
+                str(r["phone"]) if r["phone"] != "" else None,
+                email,
+                r["website"],
+                r["category"],
             )
-            row = cur.fetchone()
 
-        existing_id = row[0] if row else None
-        existing_status = row[1] if row and len(row) > 1 else None
+            gender = r.get("gender") or None
+            application = normalize_application(r.get("application"))
+            product_interest = r.get("product_interest") or None
 
-        final_status = status_from_file or existing_status or "New"
-
-        payload_common = (
-            r["scan_datetime"],
-            r["first_name"],
-            r["last_name"],
-            r["job_title"],
-            r["company"],
-            r["street"],
-            r["street2"],
-            r["zip_code"],
-            r["city"],
-            r["state"],
-            r["country"],
-            str(r["phone"]) if r["phone"] != "" else None,
-            email,
-            r["website"],
-            r["category"],
-        )
-
-        gender = r.get("gender") or None
-        application = normalize_application(r.get("application"))
-        product_interest = r.get("product_interest") or None
-
-        if existing_id:
-            if existing_status != final_status:
+            if existing_id:
+                if existing_status != final_status:
+                    cur.execute(
+                        """
+                        INSERT INTO status_history(contact_id, ts, old_status, new_status)
+                        VALUES (?,?,?,?)
+                        """,
+                        (
+                            existing_id,
+                            datetime.utcnow().isoformat(),
+                            existing_status,
+                            final_status,
+                        ),
+                    )
                 cur.execute(
                     """
-                    INSERT INTO status_history(contact_id, ts, old_status, new_status)
-                    VALUES (?,?,?,?)
+                    UPDATE contacts SET
+                        scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
+                        street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
+                        category=?, status=?, gender=?, application=?, product_interest=?, photo=?, profile_url=?
+                    WHERE id=?
                     """,
-                    (
-                        existing_id,
-                        datetime.utcnow().isoformat(),
-                        existing_status,
+                    payload_common
+                    + (
                         final_status,
+                        gender,
+                        application,
+                        product_interest,
+                        photo_path,
+                        profile_url,
+                        existing_id,
                     ),
                 )
-            cur.execute(
-                """
-                UPDATE contacts SET
-                    scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
-                    street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
-                    category=?, status=?, gender=?, application=?, product_interest=?, photo=?, profile_url=?
-                WHERE id=?
-                """,
-                payload_common
-                + (
-                    final_status,
-                    gender,
-                    application,
-                    product_interest,
-                    photo_path,
-                    profile_url,
-                    existing_id,
-                ),
-            )
-            contact_id = existing_id
-        else:
-            cur.execute(
-                """
-                INSERT INTO contacts
-                (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
-                 city, state, country, phone, email, website, category, status, gender, application,
-                 product_interest, photo, profile_url)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                payload_common
-                + (
-                    final_status,
-                    gender,
-                    application,
-                    product_interest,
-                    photo_path,
-                    profile_url,
-                ),
-            )
-            contact_id = cur.lastrowid
-
-        if note_text:
-            ts_iso = r["scan_datetime"] or datetime.utcnow().isoformat()
-            cur.execute(
-                "SELECT 1 FROM notes WHERE contact_id=? AND body=?",
-                (contact_id, note_text),
-            )
-            if not cur.fetchone():
+                contact_id = existing_id
+            else:
                 cur.execute(
-                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (contact_id, ts_iso, note_text, None),
+                    """
+                    INSERT INTO contacts
+                    (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
+                     city, state, country, phone, email, website, category, status, gender, application,
+                     product_interest, photo, profile_url)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    payload_common
+                    + (
+                        final_status,
+                        gender,
+                        application,
+                        product_interest,
+                        photo_path,
+                        profile_url,
+                    ),
                 )
+                contact_id = cur.lastrowid
 
-        n += 1
+            if note_text:
+                ts_iso = r["scan_datetime"] or datetime.utcnow().isoformat()
+                cur.execute(
+                    "SELECT 1 FROM notes WHERE contact_id=? AND body=?",
+                    (contact_id, note_text),
+                )
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                        (contact_id, ts_iso, note_text, None),
+                    )
+
+            n += 1
+
+        except sqlite3.Error as e:
+            st.error(
+                f"Database error on row {idx + 1} "
+                f"(email='{email}', name='{r.get('first_name')} {r.get('last_name')}'): {e}"
+            )
+            continue
 
     conn.commit()
     backup_contacts(conn)
@@ -770,14 +770,20 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     def build_group(mask):
         sub = df_all[mask].copy()
+        cols = ["Profile", "Name", "Company", "Email", "Status"]
         if sub.empty:
-            return sub, pd.DataFrame(columns=["Profile", "Name", "Company", "Email", "Status"])
+            return sub, pd.DataFrame(columns=cols)
+
         sub["Name"] = (
             sub["first_name"].fillna("") + " " + sub["last_name"].fillna("")
         ).str.strip()
-        sub["Profile"] = sub["profile_url"]
+        sub["Profile"] = sub.get("profile_url", "").fillna("")
         display = sub[["Profile", "Name", "company", "email", "status"]].rename(
-            columns={"company": "Company", "email": "Email", "status": "Status"}
+            columns={
+                "company": "Company",
+                "email": "Email",
+                "status": "Status",
+            }
         )
         return sub, display
 
@@ -792,6 +798,10 @@ def show_priority_lists(conn: sqlite3.Connection):
     cold_count = len(cold_df)
 
     col1, col2, col3 = st.columns(3)
+
+    link_col_config = {
+        "Profile": st.column_config.LinkColumn("Profile", display_text="📌")
+    }
 
     # HOT PANEL
     with col1:
@@ -809,13 +819,7 @@ def show_priority_lists(conn: sqlite3.Connection):
                 hot_df,
                 hide_index=True,
                 use_container_width=True,
-                column_config={
-                    "Profile": st.column_config.LinkColumn(
-                        " ",
-                        help="Open profile link",
-                        display_text="📌",
-                    )
-                },
+                column_config=link_col_config,
             )
 
             hot_options = {
@@ -878,13 +882,7 @@ def show_priority_lists(conn: sqlite3.Connection):
                 pot_df,
                 hide_index=True,
                 use_container_width=True,
-                column_config={
-                    "Profile": st.column_config.LinkColumn(
-                        " ",
-                        help="Open profile link",
-                        display_text="📌",
-                    )
-                },
+                column_config=link_col_config,
             )
 
             pot_options = {
@@ -934,13 +932,7 @@ def show_priority_lists(conn: sqlite3.Connection):
                 cold_df,
                 hide_index=True,
                 use_container_width=True,
-                column_config={
-                    "Profile": st.column_config.LinkColumn(
-                        " ",
-                        help="Open profile link",
-                        display_text="📌",
-                    )
-                },
+                column_config=link_col_config,
             )
 
             cold_options = {
@@ -1035,9 +1027,9 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.caption(
         f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
     )
-    profile_header_url = row.get("profile_url")
-    if profile_header_url:
-        st.markdown(f"🔗 Profile: [{profile_header_url}]({profile_header_url})")
+    profile_url_header = row.get("profile_url")
+    if profile_url_header:
+        st.markdown(f"🔗 Profile: [{profile_url_header}]({profile_url_header})")
 
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
@@ -1168,9 +1160,9 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.rerun()
 
     with st.expander("🔗 Profile link"):
-        profile_url = row.get("profile_url")
-        if profile_url:
-            st.markdown(f"[Open profile in new tab]({profile_url})")
+        profile_url_view = row.get("profile_url")
+        if profile_url_view:
+            st.markdown(f"[Open profile in new tab]({profile_url_view})")
         else:
             st.caption("No profile URL saved for this contact.")
 
@@ -1307,7 +1299,7 @@ def add_contact_form(conn: sqlite3.Connection):
                          street, street2, zip_code, city, state, country,
                          phone, email, website, profile_url, category, status, owner, last_touch,
                          gender, application, product_interest)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             scan_dt,
@@ -1407,7 +1399,6 @@ def main():
         )
         return
 
-    # Export: no photo column, but include profile_url
     export_cols = [
         "first_name",
         "last_name",
@@ -1429,10 +1420,17 @@ def main():
         "profile_url",
     ]
     available_cols = [c for c in export_cols if c in df.columns]
+
+    # CSV export keeps internal column names
     st.session_state["export_df"] = df[available_cols].copy()
 
+    # For on-screen table, make profile column look nicer
+    display_df = df[available_cols].copy()
+    if "profile_url" in display_df.columns:
+        display_df = display_df.rename(columns={"profile_url": "Profile URL"})
+
     st.subheader("Contacts")
-    st.dataframe(df[available_cols], use_container_width=True, hide_index=True)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     options = [
         (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
