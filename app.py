@@ -4,7 +4,7 @@ import sqlite3
 import random
 import time
 from datetime import datetime, date
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Tuple, Dict
 
 import pandas as pd
 import streamlit as st
@@ -20,9 +20,6 @@ BACKUP_FILE = "data/contacts_backup.csv"
 
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
-
-# Owners list for dropdown
-OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
 
 # Raw application list, then sorted alphabetically for UI
 APPLICATIONS = sorted(
@@ -59,202 +56,211 @@ PIPELINE = [
     "Irrelevant",
 ]
 
+OWNER_CHOICES = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
+
 # -------------------------------------------------------------
-# TELEGRAM 2FA (MULTI-USER, USERNAME-BASED)
+# TELEGRAM OTP (2-FACTOR) — username first, then password
 # -------------------------------------------------------------
-def send_otp_via_telegram(token: str, chat_id: str, code: str, username: str) -> bool:
-    """Send the OTP to the specific user's chat_id and show basic errors."""
-    if not token or not chat_id:
-        st.sidebar.error("Telegram token or chat_id is missing.")
-        return False
+def _tg_token() -> Optional[str]:
+    return st.secrets.get("TELEGRAM_BOT_TOKEN")
+
+def _tg_admin_username() -> str:
+    return (st.secrets.get("ADMIN_USERNAME") or "").strip().lstrip("@")
+
+def _tg_admin_chat_id() -> Optional[str]:
+    v = st.secrets.get("ADMIN_CHAT_ID")
+    return str(v).strip() if v is not None else None
+
+def _send_telegram_message(chat_id: str, text: str) -> Tuple[bool, int, str]:
+    """Send a Telegram message. Returns (ok, status_code, response_text)."""
+    token = _tg_token()
+    if not token:
+        return False, 0, "Missing TELEGRAM_BOT_TOKEN in secrets"
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    text = f"Radom CRM login code for @{username}: {code} (valid {OTP_TTL_SECONDS//60} min)"
-
     try:
-        resp = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": text},
-            timeout=10,
-        )
-
-        if resp.status_code == 200:
-            st.sidebar.success("Code sent to your Telegram.")
-            return True
-        else:
-            try:
-                data = resp.json()
-            except Exception:
-                data = {"raw": resp.text}
-            st.sidebar.error(f"Telegram error {resp.status_code}: {data}")
-            return False
-
+        resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+        return (resp.status_code == 200), resp.status_code, resp.text
     except Exception as e:
-        st.sidebar.error(f"Exception while talking to Telegram: {e}")
-        return False
+        return False, 0, f"Exception: {e}"
 
-
-def get_or_detect_chat_id(
-    conn: sqlite3.Connection, username: str, token: str
-) -> Optional[str]:
-    """
-    For a given Telegram username, resolve the chat_id:
-
-    1) Look in local 'users' table.
-    2) If not found, call getUpdates on the bot and search for that username.
-    3) If still not found and this is the admin user, fall back to ADMIN_CHAT_ID secret.
-    4) Cache found chat_id in 'users' for future logins.
-    """
-    username_clean = (username or "").strip().lstrip("@").lower()
-    if not username_clean:
-        return None
-
-    admin_username = (
-        (st.secrets.get("ADMIN_USERNAME", "") or "").strip().lstrip("@").lower()
-    )
-    admin_chat_id = st.secrets.get("ADMIN_CHAT_ID")
-
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT chat_id FROM users WHERE LOWER(username)=?",
-        (username_clean,),
-    )
-    row = cur.fetchone()
-    if row and row[0]:
-        return str(row[0])
-
+def _telegram_get_updates() -> Tuple[bool, str, Optional[dict]]:
+    """Fetch bot updates (for chat-id auto detection)."""
+    token = _tg_token()
+    if not token:
+        return False, "Missing TELEGRAM_BOT_TOKEN in secrets", None
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     try:
         resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}: {resp.text}", None
         data = resp.json()
-    except Exception:
-        data = None
+        return True, "ok", data
+    except Exception as e:
+        return False, f"Exception: {e}", None
 
-    found_chat_id = None
+def _detect_chat_id_for_username(username_no_at: str) -> Optional[str]:
+    """
+    Best-effort detection using getUpdates.
+    Works only if user has messaged the bot at least once (e.g., /start, hi).
+    """
+    u = (username_no_at or "").strip().lstrip("@").lower()
+    if not u:
+        return None
 
-    if data and data.get("ok"):
-        for upd in data.get("result", []):
-            msg = (
-                upd.get("message")
-                or upd.get("my_chat_member")
-                or upd.get("edited_message")
-                or upd.get("channel_post")
-            )
-            if not msg:
-                continue
-            user_obj = msg.get("from") or {}
-            chat_obj = msg.get("chat") or {}
-            uname = str(user_obj.get("username", "")).lower()
-            if uname == username_clean:
-                found_chat_id = chat_obj.get("id")
-                if found_chat_id:
-                    break
+    ok, msg, data = _telegram_get_updates()
+    if not ok or not data:
+        return None
 
-    # Fallback: if this is the admin user and we have ADMIN_CHAT_ID, use it
-    if not found_chat_id and username_clean == admin_username and admin_chat_id:
-        found_chat_id = str(admin_chat_id)
-
-    if found_chat_id:
-        try:
-            cur.execute(
-                "INSERT OR REPLACE INTO users(username, chat_id) VALUES(?,?)",
-                (username_clean, str(found_chat_id)),
-            )
-            conn.commit()
-        except sqlite3.Error:
-            pass
-        return str(found_chat_id)
-
+    results = data.get("result", [])
+    # Look from newest to oldest
+    for upd in reversed(results):
+        # message
+        m = upd.get("message") or upd.get("edited_message") or None
+        if not m:
+            continue
+        chat = m.get("chat") or {}
+        frm = m.get("from") or {}
+        from_user = (frm.get("username") or "").lower()
+        if from_user == u:
+            cid = chat.get("id")
+            if cid is not None:
+                return str(cid)
     return None
 
+def _get_target_chat_id(username_no_at: str) -> Tuple[Optional[str], str]:
+    """
+    Resolve chat_id for OTP delivery.
+    Priority:
+      1) If username matches ADMIN_USERNAME and ADMIN_CHAT_ID exists -> use ADMIN_CHAT_ID (most reliable)
+      2) Try detect via getUpdates
+    """
+    u = (username_no_at or "").strip().lstrip("@")
+    if not u:
+        return None, "Missing Telegram username"
 
-def check_login_two_factor(conn: sqlite3.Connection):
-    """Password + Telegram OTP (multi-user) with on-screen fallback."""
+    if u.lower() == _tg_admin_username().lower():
+        admin_id = _tg_admin_chat_id()
+        if admin_id:
+            return admin_id, "admin_chat_id"
+        # fall through to detection if admin chat id missing
+
+    cid = _detect_chat_id_for_username(u)
+    if cid:
+        return cid, "detected"
+    return None, "not_found"
+
+def check_login_two_factor_telegram():
     expected_pw = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
 
     ss = st.session_state
     ss.setdefault("authed", False)
-    ss.setdefault("auth_stage", "pw")  # "pw" or "otp"
+    ss.setdefault("auth_stage", "login")  # login -> otp
 
     if ss["authed"]:
         return
 
     st.sidebar.header("🔐 Login")
 
-    # Stage 1: password + Telegram username, send OTP
-    if ss["auth_stage"] == "pw":
-        pwd = st.sidebar.text_input("Password", type="password", key="login_pw")
-        username_in = st.sidebar.text_input(
-            "Telegram username (without @)", key="login_username_input"
-        )
-        send_btn = st.sidebar.button("Send code")
+    # --- Login inputs (username first, then password) ---
+    username = st.sidebar.text_input("Telegram username (without @)", key="login_username_input")
+    pwd = st.sidebar.text_input("Password", type="password", key="login_password_input")
 
-        if send_btn:
-            if pwd != expected_pw:
-                st.sidebar.error("Wrong password")
-                st.stop()
+    # --- Test Telegram button ---
+    st.sidebar.caption("Troubleshooting")
+    if st.sidebar.button("🧪 Test Telegram", key="btn_test_telegram"):
+        # Try to target admin chat id first if available
+        target_cid = _tg_admin_chat_id()
+        if not target_cid:
+            # If admin chat id missing, try detect from username
+            target_cid, how = _get_target_chat_id(username)
+        else:
+            how = "admin_chat_id"
 
-            username_clean = (username_in or "").strip().lstrip("@")
-            if not username_clean:
-                st.sidebar.error("Please enter your Telegram username.")
-                st.stop()
+        if not target_cid:
+            st.sidebar.error("No chat_id available yet. Make sure you started the bot chat and set ADMIN_CHAT_ID.")
+        else:
+            ok, code, txt = _send_telegram_message(target_cid, f"✅ Telegram test from {APP_TITLE} ({how})")
+            st.sidebar.write(f"Status: {code}")
+            st.sidebar.write(txt)
+            if ok:
+                st.sidebar.success("Test message sent. Check your Telegram chat with the bot.")
 
-            ss["login_username"] = username_clean
-            code = f"{random.randint(0, 999999):06d}"
-            ss["otp_code"] = code
-            ss["otp_time"] = int(time.time())
+    st.sidebar.markdown("---")
 
-            token = st.secrets.get("TELEGRAM_BOT_TOKEN")
-            chat_id = None
-            if token:
-                chat_id = get_or_detect_chat_id(conn, username_clean, token)
-
-            if token and chat_id:
-                ok = send_otp_via_telegram(token, chat_id, code, username_clean)
-                if not ok:
-                    st.sidebar.info(f"Use this one-time code instead: **{code}**")
-            else:
-                st.sidebar.warning(
-                    "Could not send Telegram code (no token or chat_id). "
-                    "Use the on-screen code below."
-                )
-                st.sidebar.info(f"One-time code: **{code}**")
-
-            ss["auth_stage"] = "otp"
-            st.rerun()
-
-        st.stop()
-
-    # Stage 2: verify OTP
-    if ss["auth_stage"] == "otp":
-        # Expiration check
-        if "otp_time" in ss and int(time.time()) - ss["otp_time"] > OTP_TTL_SECONDS:
-            for k in ("otp_code", "otp_time", "login_username"):
-                ss.pop(k, None)
-            ss["auth_stage"] = "pw"
-            st.sidebar.error("Code expired. Please start over.")
+    # --- Continue button generates OTP and tries to send ---
+    if st.sidebar.button("Continue", key="btn_login_continue"):
+        if (pwd or "") != expected_pw:
+            st.sidebar.error("Wrong password")
             st.stop()
 
-        st.sidebar.write(
-            "Enter the 6-digit code sent to Telegram, or use the code shown earlier."
-        )
-        code_in = st.sidebar.text_input(
-            "Enter 6-digit code", max_chars=6, key="login_otp_input"
-        )
-        verify_btn = st.sidebar.button("Verify")
+        u = (username or "").strip().lstrip("@")
+        if not u:
+            st.sidebar.error("Please enter your Telegram username (without @).")
+            st.stop()
 
-        if verify_btn:
-            if code_in.strip() == ss.get("otp_code", ""):
-                ss["authed"] = True
-                for k in ("otp_code", "otp_time", "login_username", "auth_stage"):
-                    ss.pop(k, None)
-                st.sidebar.success("Logged in.")
-                st.rerun()
+        chat_id, how = _get_target_chat_id(u)
+
+        # Generate OTP
+        code = f"{random.randint(0, 999999):06d}"
+        ss["otp_code"] = code
+        ss["otp_time"] = int(time.time())
+        ss["login_username"] = u
+        ss["auth_stage"] = "otp"
+
+        # Try send to Telegram if we have chat_id
+        if chat_id:
+            ok, status, resp_text = _send_telegram_message(
+                chat_id,
+                f"🔐 {APP_TITLE} login code for @{u}: {code} (valid {OTP_TTL_SECONDS//60} min)"
+            )
+            if ok:
+                st.sidebar.success("✅ Code sent to Telegram.")
             else:
-                st.sidebar.error("Incorrect code")
-                st.stop()
+                st.sidebar.error("Failed to send Telegram message.")
+                st.sidebar.write(f"Telegram response: {status} — {resp_text}")
+                st.sidebar.info(f"Use this one-time code instead: **{code}**")
+        else:
+            # No chat id; show fallback code in sidebar
+            st.sidebar.error(
+                "Could not detect your Telegram chat. Open Telegram, search for the bot, press Start, send 'hi', then try again."
+            )
+            st.sidebar.info(f"For now, use this one-time code: **{code}**")
 
+        st.rerun()
+
+    # --- OTP stage ---
+    if ss.get("auth_stage") != "otp":
         st.stop()
+
+    # Expiration check
+    if "otp_time" in ss and int(time.time()) - ss["otp_time"] > OTP_TTL_SECONDS:
+        for k in ("otp_code", "otp_time", "login_username"):
+            ss.pop(k, None)
+        ss["auth_stage"] = "login"
+        st.sidebar.error("Code expired. Please start over.")
+        st.stop()
+
+    st.sidebar.write("Enter the 6-digit code sent to Telegram, or use the backup code shown below.")
+
+    # Always show backup OTP so it never feels “lost”
+    current_code = ss.get("otp_code")
+    if current_code:
+        st.sidebar.info(f"Backup code (current session): **{current_code}**")
+
+    code_in = st.sidebar.text_input("Enter 6-digit code", max_chars=6, key="login_otp_input")
+    if st.sidebar.button("Verify", key="btn_verify_otp"):
+        if code_in.strip() == ss.get("otp_code", ""):
+            ss["authed"] = True
+            ss["auth_stage"] = "login"
+            for k in ("otp_code", "otp_time"):
+                ss.pop(k, None)
+            st.rerun()
+        else:
+            st.sidebar.error("Incorrect code")
+            st.stop()
+
+    st.stop()
 
 
 # -------------------------------------------------------------
@@ -314,15 +320,10 @@ def init_db(conn: sqlite3.Connection):
           new_status TEXT,
           FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
         );
-
-        CREATE TABLE IF NOT EXISTS users (
-          username TEXT PRIMARY KEY,
-          chat_id TEXT
-        );
         """
     )
 
-    # Make sure new columns exist for older DBs
+    # Ensure columns exist for older DBs
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(contacts)")
     cols = [row[1] for row in cur.fetchall()]
@@ -332,8 +333,7 @@ def init_db(conn: sqlite3.Connection):
         cur.execute("ALTER TABLE contacts ADD COLUMN photo TEXT")
     if "owner" not in cols:
         cur.execute("ALTER TABLE contacts ADD COLUMN owner TEXT")
-    if "last_touch" not in cols:
-        cur.execute("ALTER TABLE contacts ADD COLUMN last_touch TEXT")
+
     conn.commit()
 
 
@@ -396,7 +396,7 @@ COLMAP = {
     "stage": "status",
     "photo": "photo",
     "owner": "owner",
-    # various ways of naming profile links
+    # profile links
     "linkedin": "profile_url",
     "linkedin url": "profile_url",
     "linkedin_url": "profile_url",
@@ -428,9 +428,9 @@ EXPECTED = [
     "application",
     "product_interest",
     "status",
+    "owner",
     "photo",
     "profile_url",
-    "owner",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
@@ -439,7 +439,6 @@ IND_PAT = re.compile(
     r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b",
     re.I,
 )
-
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     new_cols = {
@@ -451,7 +450,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = None
     return df
-
 
 def infer_category(row: pd.Series) -> str:
     title = (row.get("job_title") or "")
@@ -467,7 +465,6 @@ def infer_category(row: pd.Series) -> str:
         return "Industry"
     return "Other"
 
-
 def parse_dt(v) -> Optional[str]:
     if v is None or str(v).strip() == "" or pd.isna(v):
         return None
@@ -475,7 +472,6 @@ def parse_dt(v) -> Optional[str]:
         return dtparser.parse(str(v)).isoformat()
     except Exception:
         return str(v)
-
 
 def normalize_status(val: Any) -> Optional[str]:
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -500,7 +496,6 @@ def normalize_status(val: Any) -> Optional[str]:
         return synonyms[s]
     return None
 
-
 def normalize_application(val: Any) -> Optional[str]:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
@@ -508,12 +503,10 @@ def normalize_application(val: Any) -> Optional[str]:
     if not s:
         return None
 
-    # exact match to list first
     for app in APPLICATIONS:
         if s == app.lower():
             return app
 
-    # keyword-based mapping
     if "pfas" in s:
         return "PFAS destruction"
     if "co2" in s or "carbon dioxide" in s:
@@ -542,7 +535,6 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Ultrasonic"
     if "surface" in s and ("treat" in s or "coating" in s or "modify" in s):
         return "Surface treatment"
-
     return None
 
 
@@ -551,11 +543,8 @@ def normalize_application(val: Any) -> Optional[str]:
 # -------------------------------------------------------------
 def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     cols_lower = [str(c).strip().lower() for c in df.columns]
-
-    # If we already have 'first_name' or 'first name' as a column, nothing to do.
     if "first_name" in cols_lower or "first name" in cols_lower:
         return df
-
     if df.empty:
         return df
 
@@ -567,30 +556,13 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     first_vals_lower = [v.lower() for v in first_vals]
 
     known = set(COLMAP.keys()) | set(EXPECTED) | {
-        "first_name",
-        "last_name",
-        "email",
-        "phone",
-        "job_title",
-        "company",
-        "city",
-        "state",
-        "country",
-        "category",
-        "status",
-        "owner",
-        "gender",
-        "application",
-        "product_interest",
-        "last_touch",
-        "notes",
-        "photo",
-        "profile_url",
+        "first_name", "last_name", "email", "phone", "job_title", "company",
+        "city", "state", "country", "category", "status", "owner",
+        "gender", "application", "product_interest", "last_touch",
+        "notes", "photo", "profile_url"
     }
 
     score = sum(1 for v in first_vals_lower if v in known)
-
-    # Heuristic: if we see at least 3 known header names in row 0, treat it as header.
     if score >= 3:
         new_cols = []
         for i, val in enumerate(first_vals_lower):
@@ -601,16 +573,13 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
         df.columns = new_cols
 
-        # Drop completely empty 'extra_*' columns
         for c in list(df.columns):
             if c.startswith("extra_") and df[c].isna().all():
                 df = df.drop(columns=[c])
 
     return df
 
-
 def load_contacts_file(uploaded_file) -> pd.DataFrame:
-    """Load CSV/XLSX and fix header row if needed."""
     if uploaded_file.name.lower().endswith(".csv"):
         df = pd.read_csv(uploaded_file)
     else:
@@ -628,7 +597,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     n = 0
     cur = conn.cursor()
     for idx, r in df.iterrows():
-        email = (r["email"] or "").strip().lower() or None
+        email = r["email"].strip().lower() or None
         status_from_file = r.get("status_norm")
         note_text = (r.get("notes") or "").strip()
         photo_path = (r.get("photo") or "").strip() or None
@@ -648,10 +617,9 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
             existing_id = row[0] if row else None
             existing_status = row[1] if row and len(row) > 1 else None
-
             final_status = status_from_file or existing_status or "New"
 
-            payload_common_main = (
+            payload_common = (
                 r["scan_datetime"],
                 r["first_name"],
                 r["last_name"],
@@ -672,7 +640,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             gender = r.get("gender") or None
             application = normalize_application(r.get("application"))
             product_interest = r.get("product_interest") or None
-            last_touch = r["scan_datetime"] or datetime.utcnow().isoformat()
 
             if existing_id:
                 if existing_status != final_status:
@@ -693,14 +660,13 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     UPDATE contacts SET
                         scan_datetime=?, first_name=?, last_name=?, job_title=?, company=?,
                         street=?, street2=?, zip_code=?, city=?, state=?, country=?, phone=?, email=?, website=?,
-                        category=?, status=?, owner=?, last_touch=?, gender=?, application=?, product_interest=?, photo=?, profile_url=?
+                        category=?, status=?, owner=?, gender=?, application=?, product_interest=?, photo=?, profile_url=?
                     WHERE id=?
                     """,
-                    payload_common_main
+                    payload_common
                     + (
                         final_status,
                         owner,
-                        last_touch,
                         gender,
                         application,
                         product_interest,
@@ -715,15 +681,14 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     """
                     INSERT INTO contacts
                     (scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
-                     city, state, country, phone, email, website, category, status, owner, last_touch,
-                     gender, application, product_interest, photo, profile_url)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     city, state, country, phone, email, website, category, status, owner, gender, application,
+                     product_interest, photo, profile_url)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
-                    payload_common_main
+                    payload_common
                     + (
                         final_status,
                         owner,
-                        last_touch,
                         gender,
                         application,
                         product_interest,
@@ -801,9 +766,7 @@ def query_contacts(
         params += app_filter
 
     if prod_filter:
-        sql += (
-            " AND product_interest IN (" + ",".join("?" for _ in prod_filter) + ")"
-        )
+        sql += " AND product_interest IN (" + ",".join("?" for _ in prod_filter) + ")"
         params += prod_filter
 
     return pd.read_sql_query(sql, conn, params=params)
@@ -826,18 +789,13 @@ def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
 
     grouped = (
         df.groupby("contact_id")["body"]
-        .apply(
-            lambda s: " || ".join(
-                [str(x).strip() for x in s if str(x).strip() != ""]
-            )
-        )
+        .apply(lambda s: " || ".join([str(x).strip() for x in s if str(x).strip() != ""]))
         .reset_index(name="notes")
     )
     return grouped
 
 
 def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status: str):
-    """Update status + history; strip spaces to avoid 'New ' vs 'New' issues."""
     new_status = (new_status or "New").strip()
     cur = conn.cursor()
     cur.execute("SELECT status FROM contacts WHERE id=?", (contact_id,))
@@ -882,9 +840,7 @@ def show_won_counter(conn: sqlite3.Connection):
         """,
         conn,
     )
-    companies = (
-        df_companies["company"].dropna().tolist() if not df_companies.empty else []
-    )
+    companies = df_companies["company"].dropna().tolist() if not df_companies.empty else []
 
     st.markdown(
         f"""
@@ -910,59 +866,13 @@ def show_won_counter(conn: sqlite3.Connection):
 
 
 # -------------------------------------------------------------
-# FLAGS HELPER
-# -------------------------------------------------------------
-def country_to_flag(country: str) -> str:
-    if not country:
-        return ""
-    s = str(country).strip().upper()
-    if not s:
-        return ""
-
-    # Basic mapping for common cases
-    mapping = {
-        "UNITED STATES": "US",
-        "USA": "US",
-        "U.S.": "US",
-        "UNITED STATES OF AMERICA": "US",
-        "UK": "GB",
-        "UNITED KINGDOM": "GB",
-        "ENGLAND": "GB",
-        "SCOTLAND": "GB",
-        "WALES": "GB",
-        "GERMANY": "DE",
-        "FRANCE": "FR",
-        "ITALY": "IT",
-        "CANADA": "CA",
-        "MEXICO": "MX",
-        "JAPAN": "JP",
-        "CHINA": "CN",
-        "BRAZIL": "BR",
-        "INDIA": "IN",
-        "AUSTRALIA": "AU",
-    }
-
-    code = None
-    if len(s) == 2 and s.isalpha():
-        code = s
-    else:
-        code = mapping.get(s)
-
-    if not code:
-        return ""
-
-    # Convert country code to regional indicator symbols
-    return "".join(chr(ord("🇦") + ord(c) - ord("A")) for c in code)
-
-
-# -------------------------------------------------------------
 # TOP PRIORITY LISTS (HOT / POTENTIAL / COLD)
 # -------------------------------------------------------------
 def show_priority_lists(conn: sqlite3.Connection):
     st.subheader("Customer overview")
 
     df_all = pd.read_sql_query(
-        "SELECT id, first_name, last_name, company, email, status, profile_url, country FROM contacts",
+        "SELECT id, first_name, last_name, company, email, status, profile_url FROM contacts",
         conn,
     )
 
@@ -970,82 +880,56 @@ def show_priority_lists(conn: sqlite3.Connection):
         st.caption("No contacts yet – add someone manually or import a file.")
         return
 
-    # Normalize status + flag
     df_all["status"] = df_all["status"].fillna("New").astype(str).str.strip()
-    df_all["flag"] = df_all["country"].fillna("").apply(country_to_flag)
 
     def build_group(mask):
         sub = df_all[mask].copy()
-        cols = ["Flag", "Profile", "Name", "Company", "Email", "Status"]
+        cols = ["Profile", "Name", "Company", "Email", "Status"]
         if sub.empty:
             return sub, pd.DataFrame(columns=cols)
 
-        sub["Name"] = (
-            sub["first_name"].fillna("") + " " + sub["last_name"].fillna("")
-        ).str.strip()
+        sub["Name"] = (sub["first_name"].fillna("") + " " + sub["last_name"].fillna("")).str.strip()
         sub["Profile"] = sub.get("profile_url", "").fillna("")
-        sub["Flag"] = sub.get("flag", "").fillna("")
-        display = sub[["Flag", "Profile", "Name", "company", "email", "status"]].rename(
-            columns={
-                "company": "Company",
-                "email": "Email",
-                "status": "Status",
-            }
+        display = sub[["Profile", "Name", "company", "email", "status"]].rename(
+            columns={"company": "Company", "email": "Email", "status": "Status"}
         )
         return sub, display
 
     hot_raw, hot_df = build_group(df_all["status"].isin(["Quoted", "Meeting"]))
     pot_raw, pot_df = build_group(df_all["status"].isin(["New", "Contacted"]))
-    cold_raw, cold_df = build_group(
-        df_all["status"].isin(["Pending", "On hold", "Irrelevant"])
-    )
-
-    hot_count = len(hot_df)
-    pot_count = len(pot_df)
-    cold_count = len(cold_df)
+    cold_raw, cold_df = build_group(df_all["status"].isin(["Pending", "On hold", "Irrelevant"]))
 
     col1, col2, col3 = st.columns(3)
-
-    link_col_config = {
-        "Profile": st.column_config.LinkColumn("Profile", display_text="👤")
-    }
+    link_col_config = {"Profile": st.column_config.LinkColumn("Profile", display_text="👤")}
 
     # HOT PANEL
     with col1:
-        hot_header = f"""
+        st.markdown(
+            f"""
             <div style="background-color:#ff6b6b;padding:6px 10px;border-radius:8px;
                         font-weight:600;color:white;text-align:center;margin-bottom:6px;">
-                🔥 Hot customers ({hot_count}) — Quoted / Meeting
+                🔥 Hot customers ({len(hot_df)}) — Quoted / Meeting
             </div>
-        """
-        st.markdown(hot_header, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
         if hot_df.empty:
             st.caption("No leads in this group.")
         else:
-            st.dataframe(
-                hot_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config=link_col_config,
-            )
+            st.dataframe(hot_df, hide_index=True, use_container_width=True, column_config=link_col_config)
 
             hot_options = {
                 int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
                 for row in hot_raw.itertuples()
             }
-            selected_hot = st.selectbox(
-                "Pick hot lead to move",
-                list(hot_options.keys()),
-                format_func=lambda cid: hot_options.get(cid, str(cid)),
-                key="hot_select",
-            )
+            selected_hot = st.selectbox("Pick hot lead to move", list(hot_options.keys()),
+                                        format_func=lambda cid: hot_options.get(cid, str(cid)),
+                                        key="hot_select")
             c_hot1, c_hot2 = st.columns(2)
             with c_hot1:
                 if st.button("Move to Potential", key="btn_hot_to_pot"):
                     cur = conn.cursor()
-                    cur.execute(
-                        "SELECT status FROM contacts WHERE id=?", (selected_hot,)
-                    )
+                    cur.execute("SELECT status FROM contacts WHERE id=?", (selected_hot,))
                     old = (cur.fetchone() or ["New"])[0]
                     old = (old or "New").strip()
                     if old == "Quoted":
@@ -1059,9 +943,7 @@ def show_priority_lists(conn: sqlite3.Connection):
             with c_hot2:
                 if st.button("Move to Cold", key="btn_hot_to_cold"):
                     cur = conn.cursor()
-                    cur.execute(
-                        "SELECT status FROM contacts WHERE id=?", (selected_hot,)
-                    )
+                    cur.execute("SELECT status FROM contacts WHERE id=?", (selected_hot,))
                     old = (cur.fetchone() or ["New"])[0]
                     old = (old or "New").strip()
                     if old == "Quoted":
@@ -1075,33 +957,27 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     # POTENTIAL PANEL
     with col2:
-        pot_header = f"""
+        st.markdown(
+            f"""
             <div style="background-color:#28a745;padding:6px 10px;border-radius:8px;
                         font-weight:600;color:white;text-align:center;margin-bottom:6px;">
-                🌱 Potential customers ({pot_count}) — New / Contacted
+                🌱 Potential customers ({len(pot_df)}) — New / Contacted
             </div>
-        """
-        st.markdown(pot_header, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
         if pot_df.empty:
             st.caption("No leads in this group.")
         else:
-            st.dataframe(
-                pot_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config=link_col_config,
-            )
+            st.dataframe(pot_df, hide_index=True, use_container_width=True, column_config=link_col_config)
 
             pot_options = {
                 int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
                 for row in pot_raw.itertuples()
             }
-            selected_pot = st.selectbox(
-                "Pick potential lead to move",
-                list(pot_options.keys()),
-                format_func=lambda cid: pot_options.get(cid, str(cid)),
-                key="pot_select",
-            )
+            selected_pot = st.selectbox("Pick potential lead to move", list(pot_options.keys()),
+                                        format_func=lambda cid: pot_options.get(cid, str(cid)),
+                                        key="pot_select")
             c_pot1, c_pot2 = st.columns(2)
             with c_pot1:
                 if st.button("Move to Hot", key="btn_pot_to_hot"):
@@ -1124,33 +1000,27 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     # COLD PANEL
     with col3:
-        cold_header = f"""
+        st.markdown(
+            f"""
             <div style="background-color:#007bff;padding:6px 10px;border-radius:8px;
                         font-weight:600;color:white;text-align:center;margin-bottom:6px;">
-                ❄️ Cold customers ({cold_count}) — Pending / On hold / Irrelevant
+                ❄️ Cold customers ({len(cold_df)}) — Pending / On hold / Irrelevant
             </div>
-        """
-        st.markdown(cold_header, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
         if cold_df.empty:
             st.caption("No leads in this group.")
         else:
-            st.dataframe(
-                cold_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config=link_col_config,
-            )
+            st.dataframe(cold_df, hide_index=True, use_container_width=True, column_config=link_col_config)
 
             cold_options = {
                 int(row.id): f"{row.first_name} {row.last_name} — {row.company or ''} ({row.email or ''}) [{row.status}]"
                 for row in cold_raw.itertuples()
             }
-            selected_cold = st.selectbox(
-                "Pick cold lead to move",
-                list(cold_options.keys()),
-                format_func=lambda cid: cold_options.get(cid, str(cid)),
-                key="cold_select",
-            )
+            selected_cold = st.selectbox("Pick cold lead to move", list(cold_options.keys()),
+                                         format_func=lambda cid: cold_options.get(cid, str(cid)),
+                                         key="cold_select")
             c_cold1, c_cold2 = st.columns(2)
             with c_cold1:
                 if st.button("Move to Potential", key="btn_cold_to_pot"):
@@ -1168,9 +1038,7 @@ def show_priority_lists(conn: sqlite3.Connection):
 def sidebar_import_export(conn: sqlite3.Connection):
     st.sidebar.header("Import / Export")
 
-    up = st.sidebar.file_uploader(
-        "Upload Excel/CSV (Contacts)", type=["xlsx", "xls", "csv"]
-    )
+    up = st.sidebar.file_uploader("Upload Excel/CSV (Contacts)", type=["xlsx", "xls", "csv"])
     if up is not None:
         df = load_contacts_file(up)
         n = upsert_contacts(conn, df)
@@ -1225,15 +1093,19 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
     contact_id = int(row["id"])
 
-    st.markdown(
-        f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}"
-    )
-    st.caption(
-        f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}"
-    )
+    st.markdown(f"### ✏️ {row['first_name']} {row['last_name']} — {row.get('company') or ''}")
+    st.caption(f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}")
+
     profile_url_header = row.get("profile_url")
     if profile_url_header:
         st.markdown(f"🔗 Profile: [{profile_url_header}]({profile_url_header})")
+
+    website_header = row.get("website")
+    if website_header:
+        w = str(website_header).strip()
+        if w and not w.lower().startswith(("http://", "https://")):
+            w = "https://" + w
+        st.markdown(f"🌐 Website: [{w}]({w})")
 
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
@@ -1243,69 +1115,37 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             phone = st.text_input("Phone", row["phone"] or "")
 
             gender_options = ["", "Female", "Male", "Other"]
-            raw_gender = row["gender"] or ""
+            raw_gender = row.get("gender") or ""
             current_gender = raw_gender if raw_gender in gender_options else ""
-            gender_index = gender_options.index(current_gender)
+            gender = st.selectbox("Gender", gender_options, index=gender_options.index(current_gender))
 
-            gender = st.selectbox(
-                "Gender",
-                gender_options,
-                index=gender_index,
-            )
         with col2:
             last = st.text_input("Last name", row["last_name"] or "")
             company = st.text_input("Company", row["company"] or "")
             email = st.text_input("Email", row["email"] or "")
+
             app_options = [""] + APPLICATIONS
-            current_app = row["application"] or ""
-            app_index = (
-                app_options.index(current_app) if current_app in app_options else 0
-            )
+            current_app = row.get("application") or ""
+            app_index = app_options.index(current_app) if current_app in app_options else 0
             application = st.selectbox("Application", app_options, index=app_index)
+
         with col3:
-            cat_opts = [
-                "PhD/Student",
-                "Professor/Academic",
-                "Academic",
-                "Industry",
-                "Other",
-            ]
-            category = st.selectbox(
-                "Category",
-                cat_opts,
-                index=cat_opts.index(row["category"])
-                if row["category"] in cat_opts
-                else 0,
-            )
-            status = st.selectbox(
-                "Status",
-                PIPELINE,
-                index=PIPELINE.index(row["status"])
-                if row["status"] in PIPELINE
-                else 0,
-            )
+            cat_opts = ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"]
+            category = st.selectbox("Category", cat_opts,
+                                    index=cat_opts.index(row["category"]) if row["category"] in cat_opts else 0)
 
-            owner_options = OWNERS
-            raw_owner = row["owner"] or ""
-            current_owner = raw_owner if raw_owner in owner_options else ""
-            owner_index = owner_options.index(current_owner)
-
-            owner = st.selectbox(
-                "Owner",
-                owner_options,
-                index=owner_index,
-            )
+            status = st.selectbox("Status", PIPELINE,
+                                  index=PIPELINE.index(row["status"]) if row["status"] in PIPELINE else 0)
 
             product_options = [""] + PRODUCTS
-            raw_prod = row["product_interest"] or ""
-            current_prod = raw_prod if raw_prod in product_options else ""
-            prod_index = product_options.index(current_prod)
+            raw_prod = row.get("product_interest") or ""
+            prod_index = product_options.index(raw_prod) if raw_prod in product_options else 0
+            product = st.selectbox("Product type interest", product_options, index=prod_index)
 
-            product = st.selectbox(
-                "Product type interest",
-                product_options,
-                index=prod_index,
-            )
+            # Owner dropdown
+            current_owner = (row.get("owner") or "").strip()
+            owner_index = OWNER_CHOICES.index(current_owner) if current_owner in OWNER_CHOICES else 0
+            owner = st.selectbox("Owner", OWNER_CHOICES, index=owner_index)
 
         st.write("**Address**")
         street = st.text_input("Street", row["street"] or "")
@@ -1314,7 +1154,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         state = st.text_input("State/Province", row["state"] or "")
         zipc = st.text_input("ZIP", row["zip_code"] or "")
         country = st.text_input("Country", row["country"] or "")
-        website = st.text_input("Website", row["website"] or "")
+        website = st.text_input("Website", row.get("website") or "")
         profile_url = st.text_input("Profile URL", row.get("profile_url") or "")
 
         col_save, col_delete = st.columns([3, 1])
@@ -1325,11 +1165,16 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
         if saved:
             cur = conn.cursor()
-            if row["status"] != status:
+            if (row["status"] or "").strip() != (status or "").strip():
                 cur.execute(
                     "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
                     (contact_id, datetime.utcnow().isoformat(), row["status"], status),
                 )
+
+            email_norm = (email or "").lower().strip() or None
+            website_norm = (website or "").strip() or None
+            profile_norm = (profile_url or "").strip() or None
+
             conn.execute(
                 """
                 UPDATE contacts SET
@@ -1339,12 +1184,12 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 WHERE id=?
                 """,
                 (
-                    first,
-                    last,
-                    job,
-                    company,
+                    first or None,
+                    last or None,
+                    job or None,
+                    company or None,
                     phone or None,
-                    (email or "").lower().strip() or None,
+                    email_norm,
                     category,
                     status,
                     owner or None,
@@ -1354,8 +1199,8 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     state or None,
                     zipc or None,
                     country or None,
-                    website or None,
-                    (profile_url or "").strip() or None,
+                    website_norm,
+                    profile_norm,
                     datetime.utcnow().isoformat(),
                     gender or None,
                     normalize_application(application),
@@ -1375,27 +1220,12 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.success("Contact deleted")
             st.rerun()
 
-    with st.expander("🔗 Profile link"):
-        profile_url_view = row.get("profile_url")
-        if profile_url_view:
-            st.markdown(f"[Open profile in new tab]({profile_url_view})")
-        else:
-            st.caption("No profile URL saved for this contact.")
-
     st.markdown("#### 🗒️ Notes")
     note_key = f"note_{contact_id}"
     fu_key = f"nextfu_{contact_id}"
 
-    new_note = st.text_area(
-        "Add a note",
-        key=note_key,
-        placeholder="Called; left voicemail…",
-    )
-    next_fu = st.date_input(
-        "Next follow-up",
-        value=st.session_state.get(fu_key, date.today()),
-        key=fu_key,
-    )
+    new_note = st.text_area("Add a note", key=note_key, placeholder="Called; left voicemail…")
+    next_fu = st.date_input("Next follow-up", value=st.session_state.get(fu_key, date.today()), key=fu_key)
 
     col_add_note, col_clear_note = st.columns([2, 1])
     with col_add_note:
@@ -1407,10 +1237,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
                     (contact_id, ts_iso, new_note.strip(), fu_iso),
                 )
-                conn.execute(
-                    "UPDATE contacts SET last_touch=? WHERE id=?",
-                    (ts_iso, contact_id),
-                )
+                conn.execute("UPDATE contacts SET last_touch=? WHERE id=?", (ts_iso, contact_id))
                 conn.commit()
                 backup_contacts(conn)
                 st.session_state.pop(note_key, None)
@@ -1428,7 +1255,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
 
 # -------------------------------------------------------------
-# MANUAL ADD CONTACT FORM
+# MANUAL ADD CONTACT FORM (with Owner dropdown)
 # -------------------------------------------------------------
 def add_contact_form(conn: sqlite3.Connection):
     st.markdown("### ➕ Add new contact manually")
@@ -1440,46 +1267,21 @@ def add_contact_form(conn: sqlite3.Connection):
                 first = st.text_input("First name", key="add_first")
                 job = st.text_input("Job title", key="add_job")
                 phone = st.text_input("Phone", key="add_phone")
-                gender = st.selectbox(
-                    "Gender",
-                    ["", "Female", "Male", "Other"],
-                    key="add_gender",
-                )
+                gender = st.selectbox("Gender", ["", "Female", "Male", "Other"], key="add_gender")
             with col2:
                 last = st.text_input("Last name", key="add_last")
                 company = st.text_input("Company", key="add_company")
                 email = st.text_input("Email", key="add_email")
-                application_raw = st.selectbox(
-                    "Application",
-                    [""] + APPLICATIONS,
-                    key="add_application",
-                )
+                application_raw = st.selectbox("Application", [""] + APPLICATIONS, key="add_application")
             with col3:
-                cat_opts = [
-                    "PhD/Student",
-                    "Professor/Academic",
-                    "Academic",
-                    "Industry",
-                    "Other",
-                ]
-                category = st.selectbox(
-                    "Category",
-                    cat_opts,
-                    index=3,
-                    key="add_category",
-                )
-                status = st.selectbox(
-                    "Status",
-                    PIPELINE,
-                    index=0,
-                    key="add_status",
-                )
-                owner = st.selectbox("Owner", OWNERS, key="add_owner")
-                product = st.selectbox(
-                    "Product type interest",
-                    [""] + PRODUCTS,
-                    key="add_product",
-                )
+                cat_opts = ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"]
+                category = st.selectbox("Category", cat_opts, index=3, key="add_category")
+                status = st.selectbox("Status", PIPELINE, index=0, key="add_status")
+
+                # Owner dropdown
+                owner = st.selectbox("Owner", OWNER_CHOICES, index=0, key="add_owner")
+
+                product = st.selectbox("Product type interest", [""] + PRODUCTS, key="add_product")
 
             st.write("**Address**")
             street = st.text_input("Street", key="add_street")
@@ -1491,13 +1293,6 @@ def add_contact_form(conn: sqlite3.Connection):
             website = st.text_input("Website", key="add_website")
             profile_url = st.text_input("Profile URL", key="add_profile_url")
 
-            st.write("**Initial note (optional)**")
-            first_note = st.text_area(
-                "Note",
-                key="add_note",
-                placeholder="Met at AIChE Boston, interested in CO₂ → fertilizer...",
-            )
-
             col_create, col_clear = st.columns([3, 1])
             with col_create:
                 submitted = st.form_submit_button("Create contact")
@@ -1506,17 +1301,14 @@ def add_contact_form(conn: sqlite3.Connection):
 
             if submitted:
                 if not email and not (first and last and company):
-                    st.error(
-                        "Please provide either an email, or first name + last name + company."
-                    )
+                    st.error("Please provide either an email, or first name + last name + company.")
                 else:
                     scan_dt = datetime.utcnow().isoformat()
                     email_norm = (email or "").strip().lower() or None
                     status_norm = normalize_status(status) or "New"
                     application_norm = normalize_application(application_raw)
 
-                    cur = conn.cursor()
-                    cur.execute(
+                    conn.execute(
                         """
                         INSERT INTO contacts
                         (scan_datetime, first_name, last_name, job_title, company,
@@ -1539,26 +1331,17 @@ def add_contact_form(conn: sqlite3.Connection):
                             country or None,
                             phone or None,
                             email_norm,
-                            website or None,
+                            (website or "").strip() or None,
                             (profile_url or "").strip() or None,
                             category,
                             status_norm,
-                            (owner or "").strip() or None,
+                            owner or None,
                             scan_dt,
                             gender or None,
                             application_norm,
                             product or None,
                         ),
                     )
-                    contact_id = cur.lastrowid
-
-                    if first_note.strip():
-                        ts_iso = datetime.utcnow().isoformat()
-                        conn.execute(
-                            "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                            (contact_id, ts_iso, first_note.strip(), None),
-                        )
-
                     conn.commit()
                     backup_contacts(conn)
                     st.success("New contact created")
@@ -1566,27 +1349,11 @@ def add_contact_form(conn: sqlite3.Connection):
 
             if clear:
                 for key in [
-                    "add_first",
-                    "add_job",
-                    "add_phone",
-                    "add_gender",
-                    "add_last",
-                    "add_company",
-                    "add_email",
-                    "add_application",
-                    "add_category",
-                    "add_status",
-                    "add_owner",
-                    "add_product",
-                    "add_street",
-                    "add_street2",
-                    "add_city",
-                    "add_state",
-                    "add_zip",
-                    "add_country",
-                    "add_website",
-                    "add_profile_url",
-                    "add_note",
+                    "add_first", "add_job", "add_phone", "add_gender",
+                    "add_last", "add_company", "add_email", "add_application",
+                    "add_category", "add_status", "add_owner", "add_product",
+                    "add_street", "add_street2", "add_city", "add_state",
+                    "add_zip", "add_country", "add_website", "add_profile_url",
                 ]:
                     st.session_state.pop(key, None)
                 st.rerun()
@@ -1597,12 +1364,11 @@ def add_contact_form(conn: sqlite3.Connection):
 # -------------------------------------------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+    check_login_two_factor_telegram()
 
     conn = get_conn()
     init_db(conn)
     restore_from_backup_if_empty(conn)
-
-    check_login_two_factor(conn)
 
     top_l, top_r = st.columns([3, 1])
     with top_l:
@@ -1612,9 +1378,7 @@ def main():
         show_won_counter(conn)
 
     sidebar_import_export(conn)
-
     show_priority_lists(conn)
-
     add_contact_form(conn)
 
     q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
@@ -1635,56 +1399,43 @@ def main():
         return
 
     export_cols = [
-        "first_name",
-        "last_name",
-        "email",
-        "phone",
-        "job_title",
-        "company",
-        "city",
-        "state",
-        "country",
-        "category",
-        "status",
-        "owner",
-        "gender",
-        "application",
-        "product_interest",
-        "last_touch",
-        "notes",
-        "website",
-        "profile_url",
+        "first_name", "last_name", "email", "phone", "job_title", "company",
+        "city", "state", "country", "category", "status", "owner", "gender",
+        "application", "product_interest", "last_touch", "notes", "website", "profile_url",
     ]
     available_cols = [c for c in export_cols if c in df.columns]
 
     st.session_state["export_df"] = df[available_cols].copy()
 
     display_df = df[available_cols].copy()
+
+    # Make website + profile look like link columns in UI
+    col_config = {}
     if "profile_url" in display_df.columns:
         display_df = display_df.rename(columns={"profile_url": "Profile URL"})
+        col_config["Profile URL"] = st.column_config.LinkColumn("Profile URL", display_text="👤")
+
+    if "website" in display_df.columns:
+        col_config["website"] = st.column_config.LinkColumn("website", display_text="🌐")
+
+        # Normalize website links visually (add https:// if missing)
+        def _norm_web(v):
+            if v is None:
+                return ""
+            s = str(v).strip()
+            if not s:
+                return ""
+            if not s.lower().startswith(("http://", "https://")):
+                return "https://" + s
+            return s
+        display_df["website"] = display_df["website"].apply(_norm_web)
 
     st.subheader("Contacts")
-
-    col_config = {}
-    if "Profile URL" in display_df.columns:
-        col_config["Profile URL"] = st.column_config.LinkColumn(
-            "Profile URL", display_text="👤"
-        )
-    if "website" in display_df.columns:
-        col_config["website"] = st.column_config.LinkColumn("website")
-
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config=col_config,
-    )
+    st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=col_config)
 
     options = [
         (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
-        for r in df[["id", "first_name", "last_name", "company"]].itertuples(
-            index=False
-        )
+        for r in df[["id", "first_name", "last_name", "company"]].itertuples(index=False)
     ]
     if not options:
         return
