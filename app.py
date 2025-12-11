@@ -170,12 +170,15 @@ def get_or_detect_chat_id(
 
     1) Look in local 'users' table.
     2) If not found, call getUpdates on the bot and search for that username.
-       (User must have pressed 'Start' with the bot at least once.)
-    3) Cache found chat_id in 'users' for future logins.
+    3) If still not found and this is the admin user, fall back to ADMIN_CHAT_ID secret.
+    4) Cache found chat_id in 'users' for future logins.
     """
     username_clean = (username or "").strip().lstrip("@").lower()
     if not username_clean:
         return None
+
+    admin_username = (st.secrets.get("ADMIN_USERNAME", "") or "").strip().lstrip("@").lower()
+    admin_chat_id = st.secrets.get("ADMIN_CHAT_ID")
 
     cur = conn.cursor()
     cur.execute(
@@ -191,28 +194,31 @@ def get_or_detect_chat_id(
         resp = requests.get(url, timeout=10)
         data = resp.json()
     except Exception:
-        return None
-
-    if not data.get("ok"):
-        return None
+        data = None
 
     found_chat_id = None
-    for upd in data.get("result", []):
-        msg = (
-            upd.get("message")
-            or upd.get("my_chat_member")
-            or upd.get("edited_message")
-            or upd.get("channel_post")
-        )
-        if not msg:
-            continue
-        user_obj = msg.get("from") or {}
-        chat_obj = msg.get("chat") or {}
-        uname = str(user_obj.get("username", "")).lower()
-        if uname == username_clean:
-            found_chat_id = chat_obj.get("id")
-            if found_chat_id:
-                break
+
+    if data and data.get("ok"):
+        for upd in data.get("result", []):
+            msg = (
+                upd.get("message")
+                or upd.get("my_chat_member")
+                or upd.get("edited_message")
+                or upd.get("channel_post")
+            )
+            if not msg:
+                continue
+            user_obj = msg.get("from") or {}
+            chat_obj = msg.get("chat") or {}
+            uname = str(user_obj.get("username", "")).lower()
+            if uname == username_clean:
+                found_chat_id = chat_obj.get("id")
+                if found_chat_id:
+                    break
+
+    # ✅ Fallback: if this is the admin user and we have ADMIN_CHAT_ID, use it
+    if not found_chat_id and username_clean == admin_username and admin_chat_id:
+        found_chat_id = str(admin_chat_id)
 
     if found_chat_id:
         try:
@@ -226,7 +232,6 @@ def get_or_detect_chat_id(
         return str(found_chat_id)
 
     return None
-
 
 def send_otp_via_telegram(token: str, chat_id: str, code: str, username: str) -> bool:
     """Send the OTP to the specific user's chat_id."""
@@ -1725,3 +1730,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
