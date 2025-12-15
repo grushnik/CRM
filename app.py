@@ -59,6 +59,80 @@ PIPELINE = [
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
 
 # -------------------------------------------------------------
+# BACKGROUND (SNOWFLAKES) + GLOBAL THEME CSS
+# -------------------------------------------------------------
+def inject_winter_background():
+    # A tiny SVG snowflake pattern (data URI) so no external dependency.
+    snow_svg = r"""
+    <svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
+      <rect width="240" height="240" fill="transparent"/>
+      <g opacity="0.14" stroke="white" stroke-width="2" stroke-linecap="round">
+        <g transform="translate(60 60)">
+          <line x1="0" y1="-16" x2="0" y2="16"/>
+          <line x1="-16" y1="0" x2="16" y2="0"/>
+          <line x1="-12" y1="-12" x2="12" y2="12"/>
+          <line x1="-12" y1="12" x2="12" y2="-12"/>
+          <line x1="0" y1="-16" x2="6" y2="-10"/>
+          <line x1="0" y1="-16" x2="-6" y2="-10"/>
+          <line x1="0" y1="16" x2="6" y2="10"/>
+          <line x1="0" y1="16" x2="-6" y2="10"/>
+          <line x1="-16" y1="0" x2="-10" y2="6"/>
+          <line x1="-16" y1="0" x2="-10" y2="-6"/>
+          <line x1="16" y1="0" x2="10" y2="6"/>
+          <line x1="16" y1="0" x2="10" y2="-6"/>
+        </g>
+        <g transform="translate(180 140) scale(0.9)">
+          <line x1="0" y1="-16" x2="0" y2="16"/>
+          <line x1="-16" y1="0" x2="16" y2="0"/>
+          <line x1="-12" y1="-12" x2="12" y2="12"/>
+          <line x1="-12" y1="12" x2="12" y2="-12"/>
+        </g>
+        <g transform="translate(120 200) scale(0.7)">
+          <line x1="0" y1="-16" x2="0" y2="16"/>
+          <line x1="-16" y1="0" x2="16" y2="0"/>
+          <line x1="-12" y1="-12" x2="12" y2="12"/>
+          <line x1="-12" y1="12" x2="12" y2="-12"/>
+        </g>
+      </g>
+    </svg>
+    """.strip()
+    snow_data_uri = "data:image/svg+xml;utf8," + snow_svg.replace("\n", "").replace("#", "%23")
+
+    st.markdown(
+        f"""
+        <style>
+          /* Background layer */
+          .stApp {{
+            background:
+              radial-gradient(1200px 700px at 15% 10%, rgba(139,44,255,0.20), transparent 55%),
+              radial-gradient(900px 600px at 85% 15%, rgba(90,34,255,0.18), transparent 52%),
+              radial-gradient(900px 650px at 50% 95%, rgba(161,0,255,0.12), transparent 58%),
+              url("{snow_data_uri}");
+            background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+            background-size: auto, auto, auto, 260px 260px;
+            background-attachment: fixed;
+          }}
+
+          /* Slight frosted effect for main blocks (subtle) */
+          section[data-testid="stSidebar"] > div {{
+            background: rgba(0,0,0,0.06);
+            backdrop-filter: blur(6px);
+          }}
+
+          /* Make markdown links pop a little */
+          a {{
+            text-decoration: none;
+          }}
+          a:hover {{
+            text-decoration: underline;
+          }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# -------------------------------------------------------------
 # URL + FLAGS HELPERS
 # -------------------------------------------------------------
 def _clean_url(v: Any) -> str:
@@ -69,12 +143,9 @@ def _clean_url(v: Any) -> str:
         return ""
     if s.startswith("http://") or s.startswith("https://"):
         return s
-    # if user typed "linkedin.com/in/..." or "www..."
     return "https://" + s.lstrip("/")
 
 
-# Minimal mapping; supports full names + some common variants.
-# Also supports already-provided 2-letter ISO codes directly.
 _COUNTRY_TO_ISO2 = {
     "united states": "US",
     "usa": "US",
@@ -165,7 +236,6 @@ def _tg_api(method: str) -> str:
 
 
 def telegram_get_me() -> Tuple[int, str]:
-    """Returns (status_code, text)."""
     token = _tg_token()
     if not token:
         return 0, "Missing TELEGRAM_BOT_TOKEN in secrets."
@@ -181,7 +251,6 @@ def telegram_get_updates() -> Tuple[int, str]:
     if not token:
         return 0, "Missing TELEGRAM_BOT_TOKEN in secrets."
     try:
-        # limit updates, allow Telegram to return recent
         r = requests.get(_tg_api("getUpdates"), params={"limit": 50}, timeout=15)
         return r.status_code, r.text
     except Exception as e:
@@ -189,10 +258,6 @@ def telegram_get_updates() -> Tuple[int, str]:
 
 
 def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
-    """
-    Finds chat_id by scanning getUpdates.
-    Works after the user has pressed Start (or sent any message) to the bot.
-    """
     username = (username or "").strip().lstrip("@")
     if not username:
         return None
@@ -200,12 +265,10 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     if not token:
         return None
 
-    # cache in session_state
     cache: Dict[str, int] = st.session_state.setdefault("tg_user_cache", {})
     if username.lower() in cache:
         return cache[username.lower()]
 
-    # also check DB cache
     try:
         conn = get_conn()
         init_db(conn)
@@ -234,7 +297,6 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
                 continue
             chat = msg.get("chat") or {}
             frm = msg.get("from") or {}
-            # private chat username can appear in from and/or chat
             u1 = (frm.get("username") or "").strip().lstrip("@")
             u2 = (chat.get("username") or "").strip().lstrip("@")
             if u1.lower() == username.lower() or u2.lower() == username.lower():
@@ -255,6 +317,7 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
             return best
     except Exception:
         return None
+
     return None
 
 
@@ -276,13 +339,6 @@ def telegram_send_message(chat_id: int, text: str) -> Tuple[bool, str]:
 
 
 def check_login_two_factor_telegram():
-    """
-    Login flow:
-    1) Telegram username (without @)
-    2) Password
-    3) OTP sent to that Telegram private chat (if chat_id found)
-       - If cannot send, show fallback code only in Troubleshooting expander.
-    """
     expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
 
     ss = st.session_state
@@ -294,10 +350,10 @@ def check_login_two_factor_telegram():
 
     st.sidebar.header("🔐 Login")
 
+    # username first, then password (your request)
     tg_user = st.sidebar.text_input("Telegram username (without @)", key="login_tg_user").strip().lstrip("@")
     pwd = st.sidebar.text_input("Password", type="password", key="login_pwd")
 
-    # Step 1: validate user + password, then generate OTP
     if not ss["auth_pw_ok"]:
         if st.sidebar.button("Continue"):
             if not tg_user:
@@ -335,7 +391,6 @@ def check_login_two_factor_telegram():
 
         st.stop()
 
-    # OTP expiry
     if "otp_time" in ss and int(time.time()) - ss["otp_time"] > OTP_TTL_SECONDS:
         for k in ("auth_pw_ok", "otp_code", "otp_time", "otp_delivery_ok", "otp_delivery_msg", "login_username"):
             ss.pop(k, None)
@@ -350,9 +405,9 @@ def check_login_two_factor_telegram():
         if st.sidebar.button("Verify"):
             if code_in.strip() == ss.get("otp_code", ""):
                 ss["authed"] = True
+                # remove any on-screen fallback by clearing OTP state
                 for k in ("auth_pw_ok", "otp_code", "otp_time", "otp_delivery_ok", "otp_delivery_msg", "login_username"):
                     ss.pop(k, None)
-                # do not clear user input fields (keeps UX stable)
                 st.rerun()
             else:
                 st.sidebar.error("Incorrect code")
@@ -364,7 +419,7 @@ def check_login_two_factor_telegram():
             st.rerun()
 
     with st.sidebar.expander("Troubleshooting"):
-        # If Telegram delivery failed, show reason and ONLY THEN show fallback code
+        # show fallback ONLY if delivery failed
         if not ss.get("otp_delivery_ok", False):
             st.write(ss.get("otp_delivery_msg") or "Telegram delivery failed.")
             st.warning(f"Fallback one-time code (use only if needed): **{ss.get('otp_code','')}**")
@@ -461,7 +516,6 @@ def init_db(conn: sqlite3.Connection):
         """
     )
 
-    # Make sure columns exist for older DBs
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(contacts)")
     cols = [row[1] for row in cur.fetchall()]
@@ -545,7 +599,6 @@ COLMAP = {
     "photo": "photo",
     "owner": "owner",
     "last_touch": "last_touch",
-    # profile links
     "linkedin": "profile_url",
     "linkedin url": "profile_url",
     "linkedin_url": "profile_url",
@@ -585,17 +638,11 @@ EXPECTED = [
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
 PROF_PAT = re.compile(r"\b(assistant|associate|full)?\s*professor\b|department chair", re.I)
-IND_PAT = re.compile(
-    r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b",
-    re.I,
-)
+IND_PAT = re.compile(r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b", re.I)
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    new_cols = {
-        c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower())
-        for c in df.columns
-    }
+    new_cols = {c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower()) for c in df.columns}
     df = df.rename(columns=new_cols)
     for c in EXPECTED:
         if c not in df.columns:
@@ -703,10 +750,7 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     first_row = df.iloc[0]
-    first_vals = [
-        "" if (isinstance(v, float) and pd.isna(v)) else str(v).strip()
-        for v in first_row
-    ]
+    first_vals = ["" if (isinstance(v, float) and pd.isna(v)) else str(v).strip() for v in first_row]
     first_vals_lower = [v.lower() for v in first_vals]
 
     known = set(COLMAP.keys()) | set(EXPECTED)
@@ -748,7 +792,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         email = (r.get("email") or "").strip().lower() or None
         note_text = (r.get("notes") or "").strip()
 
-        # normalized fields
         scan_dt = r.get("scan_datetime") or None
         first = (r.get("first_name") or "").strip() or None
         last = (r.get("last_name") or "").strip() or None
@@ -773,7 +816,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         status_from_file = r.get("status_norm") or None
 
         try:
-            # find existing record
             existing_id = None
             existing_status = None
 
@@ -793,7 +835,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             final_status = status_from_file or existing_status or "New"
 
             if existing_id:
-                # history if changed
                 if existing_status != final_status:
                     cur.execute(
                         """
@@ -916,7 +957,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 )
                 contact_id = cur.lastrowid
 
-            # notes (optional from import)
             if note_text:
                 ts_iso = scan_dt or datetime.utcnow().isoformat()
                 cur.execute("SELECT 1 FROM notes WHERE contact_id=? AND body=?", (contact_id, note_text))
@@ -1335,12 +1375,14 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     profile_url_header = row.get("profile_url")
     if profile_url_header:
         u = _clean_url(profile_url_header)
-        st.markdown(f"🔗 Profile: [{u}]({u})")
+        if u:
+            st.markdown(f"🔗 Profile: [{u}]({u})")
 
     website_header = row.get("website")
     if website_header:
         w = _clean_url(website_header)
-        st.markdown(f"🌐 Website: [{w}]({w})")
+        if w:
+            st.markdown(f"🌐 Website: [{w}]({w})")
 
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
@@ -1351,7 +1393,11 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
             gender_options = ["", "Female", "Male", "Other"]
             raw_gender = row.get("gender") or ""
-            gender = st.selectbox("Gender", gender_options, index=gender_options.index(raw_gender) if raw_gender in gender_options else 0)
+            gender = st.selectbox(
+                "Gender",
+                gender_options,
+                index=gender_options.index(raw_gender) if raw_gender in gender_options else 0,
+            )
 
         with col2:
             last = st.text_input("Last name", row.get("last_name") or "")
@@ -1364,8 +1410,16 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
         with col3:
             cat_opts = ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"]
-            category = st.selectbox("Category", cat_opts, index=cat_opts.index(row["category"]) if row.get("category") in cat_opts else 0)
-            status = st.selectbox("Status", PIPELINE, index=PIPELINE.index(row["status"]) if row.get("status") in PIPELINE else 0)
+            category = st.selectbox(
+                "Category",
+                cat_opts,
+                index=cat_opts.index(row["category"]) if row.get("category") in cat_opts else 0,
+            )
+            status = st.selectbox(
+                "Status",
+                PIPELINE,
+                index=PIPELINE.index(row["status"]) if row.get("status") in PIPELINE else 0,
+            )
 
             product_options = [""] + PRODUCTS
             raw_prod = row.get("product_interest") or ""
@@ -1395,7 +1449,12 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             if (row.get("status") or "New").strip() != (status or "New").strip():
                 cur.execute(
                     "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
-                    (contact_id, datetime.utcnow().isoformat(), (row.get("status") or "New").strip(), (status or "New").strip()),
+                    (
+                        contact_id,
+                        datetime.utcnow().isoformat(),
+                        (row.get("status") or "New").strip(),
+                        (status or "New").strip(),
+                    ),
                 )
 
             ts_iso = datetime.utcnow().isoformat()
@@ -1531,7 +1590,7 @@ def add_contact_form(conn: sqlite3.Connection):
             submitted = col_create.form_submit_button("Create contact")
             cleared = col_clear.form_submit_button("Clear form")
 
-        # outside form context
+        # IMPORTANT: clear button handled OUTSIDE the form context
         if cleared:
             st.session_state["add_form_reset"] += 1
             st.rerun()
@@ -1601,6 +1660,7 @@ def add_contact_form(conn: sqlite3.Connection):
 # -------------------------------------------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+    inject_winter_background()
     check_login_two_factor_telegram()
 
     conn = get_conn()
@@ -1658,17 +1718,13 @@ def main():
     available_cols = [c for c in export_cols if c in df.columns]
     st.session_state["export_df"] = df[available_cols].copy()
 
-    # Display table
     display_df = df[available_cols].copy()
     if "profile_url" in display_df.columns:
         display_df = display_df.rename(columns={"profile_url": "Profile URL"})
     st.subheader("Contacts")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    options = [
-        (int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}")
-        for r in df[["id", "first_name", "last_name", "company"]].itertuples(index=False)
-    ]
+    options = [(int(r.id), f"{r.first_name} {r.last_name} — {r.company or ''}") for r in df[["id","first_name","last_name","company"]].itertuples(index=False)]
     option_labels = {opt[0]: opt[1] for opt in options}
 
     chosen_id = st.selectbox(
