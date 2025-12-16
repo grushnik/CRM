@@ -128,12 +128,9 @@ def _clean_url(v: Any) -> str:
         return ""
     if s.startswith("http://") or s.startswith("https://"):
         return s
-    # if user typed "linkedin.com/in/..." or "www..."
     return "https://" + s.lstrip("/")
 
 
-# Minimal mapping; supports full names + some common variants.
-# Also supports already-provided 2-letter ISO codes directly.
 _COUNTRY_TO_ISO2 = {
     "united states": "US",
     "usa": "US",
@@ -224,7 +221,6 @@ def _tg_api(method: str) -> str:
 
 
 def telegram_get_me() -> Tuple[int, str]:
-    """Returns (status_code, text)."""
     token = _tg_token()
     if not token:
         return 0, "Missing TELEGRAM_BOT_TOKEN in secrets."
@@ -240,7 +236,6 @@ def telegram_get_updates() -> Tuple[int, str]:
     if not token:
         return 0, "Missing TELEGRAM_BOT_TOKEN in secrets."
     try:
-        # limit updates, allow Telegram to return recent
         r = requests.get(_tg_api("getUpdates"), params={"limit": 50}, timeout=15)
         return r.status_code, r.text
     except Exception as e:
@@ -248,10 +243,6 @@ def telegram_get_updates() -> Tuple[int, str]:
 
 
 def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
-    """
-    Finds chat_id by scanning getUpdates.
-    Works after the user has pressed Start (or sent any message) to the bot.
-    """
     username = (username or "").strip().lstrip("@")
     if not username:
         return None
@@ -259,12 +250,10 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     if not token:
         return None
 
-    # cache in session_state
     cache: Dict[str, int] = st.session_state.setdefault("tg_user_cache", {})
     if username.lower() in cache:
         return cache[username.lower()]
 
-    # also check DB cache
     try:
         conn = get_conn()
         init_db(conn)
@@ -293,7 +282,6 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
                 continue
             chat = msg.get("chat") or {}
             frm = msg.get("from") or {}
-            # private chat username can appear in from and/or chat
             u1 = (frm.get("username") or "").strip().lstrip("@")
             u2 = (chat.get("username") or "").strip().lstrip("@")
             if u1.lower() == username.lower() or u2.lower() == username.lower():
@@ -335,13 +323,6 @@ def telegram_send_message(chat_id: int, text: str) -> Tuple[bool, str]:
 
 
 def check_login_two_factor_telegram():
-    """
-    Login flow:
-    1) Telegram username (without @)
-    2) Password
-    3) OTP sent to that Telegram private chat (if chat_id found)
-       - If cannot send, show fallback code only in Troubleshooting expander.
-    """
     expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
 
     ss = st.session_state
@@ -356,7 +337,6 @@ def check_login_two_factor_telegram():
     tg_user = st.sidebar.text_input("Telegram username (without @)", key="login_tg_user").strip().lstrip("@")
     pwd = st.sidebar.text_input("Password", type="password", key="login_pwd")
 
-    # Step 1: validate user + password, then generate OTP
     if not ss["auth_pw_ok"]:
         if st.sidebar.button("Continue"):
             if not tg_user:
@@ -394,7 +374,6 @@ def check_login_two_factor_telegram():
 
         st.stop()
 
-    # OTP expiry
     if "otp_time" in ss and int(time.time()) - ss["otp_time"] > OTP_TTL_SECONDS:
         for k in ("auth_pw_ok", "otp_code", "otp_time", "otp_delivery_ok", "otp_delivery_msg", "login_username"):
             ss.pop(k, None)
@@ -411,7 +390,6 @@ def check_login_two_factor_telegram():
                 ss["authed"] = True
                 for k in ("auth_pw_ok", "otp_code", "otp_time", "otp_delivery_ok", "otp_delivery_msg", "login_username"):
                     ss.pop(k, None)
-                # do not clear user input fields (keeps UX stable)
                 st.rerun()
             else:
                 st.sidebar.error("Incorrect code")
@@ -423,7 +401,6 @@ def check_login_two_factor_telegram():
             st.rerun()
 
     with st.sidebar.expander("Troubleshooting"):
-        # If Telegram delivery failed, show reason and ONLY THEN show fallback code
         if not ss.get("otp_delivery_ok", False):
             st.write(ss.get("otp_delivery_msg") or "Telegram delivery failed.")
             st.warning(f"Fallback one-time code (use only if needed): **{ss.get('otp_code','')}**")
@@ -520,7 +497,6 @@ def init_db(conn: sqlite3.Connection):
         """
     )
 
-    # Make sure columns exist for older DBs
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(contacts)")
     cols = [row[1] for row in cur.fetchall()]
@@ -604,7 +580,6 @@ COLMAP = {
     "photo": "photo",
     "owner": "owner",
     "last_touch": "last_touch",
-    # profile links
     "linkedin": "profile_url",
     "linkedin url": "profile_url",
     "linkedin_url": "profile_url",
@@ -644,17 +619,11 @@ EXPECTED = [
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
 PROF_PAT = re.compile(r"\b(assistant|associate|full)?\s*professor\b|department chair", re.I)
-IND_PAT = re.compile(
-    r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b",
-    re.I,
-)
+IND_PAT = re.compile(r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b", re.I)
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    new_cols = {
-        c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower())
-        for c in df.columns
-    }
+    new_cols = {c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower()) for c in df.columns}
     df = df.rename(columns=new_cols)
     for c in EXPECTED:
         if c not in df.columns:
@@ -762,10 +731,7 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     first_row = df.iloc[0]
-    first_vals = [
-        "" if (isinstance(v, float) and pd.isna(v)) else str(v).strip()
-        for v in first_row
-    ]
+    first_vals = ["" if (isinstance(v, float) and pd.isna(v)) else str(v).strip() for v in first_row]
     first_vals_lower = [v.lower() for v in first_vals]
 
     known = set(COLMAP.keys()) | set(EXPECTED)
@@ -792,9 +758,15 @@ def load_contacts_file(uploaded_file) -> pd.DataFrame:
 
 
 # -------------------------------------------------------------
-# UPSERT
+# UPSERT (NO DUPLICATES)
 # -------------------------------------------------------------
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """
+    Prevent duplicates by:
+      - using email when available
+      - otherwise using NULL-safe (first,last,company) match
+      - if first/last missing, fall back to company-only (no-email) match
+    """
     df = normalize_columns(df).fillna("")
     df["category"] = df.apply(infer_category, axis=1)
     df["scan_datetime"] = df["scan_datetime"].apply(parse_dt)
@@ -807,7 +779,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         email = (r.get("email") or "").strip().lower() or None
         note_text = (r.get("notes") or "").strip()
 
-        # normalized fields
         scan_dt = r.get("scan_datetime") or None
         first = (r.get("first_name") or "").strip() or None
         last = (r.get("last_name") or "").strip() or None
@@ -832,19 +803,39 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         status_from_file = r.get("status_norm") or None
 
         try:
-            # find existing record
             existing_id = None
             existing_status = None
 
             if email:
-                cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,))
+                cur.execute("SELECT id, status FROM contacts WHERE lower(trim(email))=lower(trim(?))", (email,))
                 row = cur.fetchone()
             else:
+                row = None
                 cur.execute(
-                    "SELECT id, status FROM contacts WHERE first_name=? AND last_name=? AND company=?",
+                    """
+                    SELECT id, status
+                    FROM contacts
+                    WHERE COALESCE(first_name,'') = ?
+                      AND COALESCE(last_name,'')  = ?
+                      AND COALESCE(company,'')    = ?
+                      AND (email IS NULL OR trim(email) = '')
+                    """,
                     (first or "", last or "", company or ""),
                 )
                 row = cur.fetchone()
+
+                if not row and (company or "").strip() and not (first or "").strip() and not (last or "").strip():
+                    cur.execute(
+                        """
+                        SELECT id, status
+                        FROM contacts
+                        WHERE COALESCE(company,'') = ?
+                          AND (COALESCE(first_name,'') = '' AND COALESCE(last_name,'') = '')
+                          AND (email IS NULL OR trim(email) = '')
+                        """,
+                        (company.strip(),),
+                    )
+                    row = cur.fetchone()
 
             if row:
                 existing_id, existing_status = int(row[0]), (row[1] or "New").strip()
@@ -852,7 +843,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             final_status = status_from_file or existing_status or "New"
 
             if existing_id:
-                # history if changed
                 if existing_status != final_status:
                     cur.execute(
                         """
@@ -975,7 +965,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 )
                 contact_id = cur.lastrowid
 
-            # notes (optional from import)
             if note_text:
                 ts_iso = scan_dt or datetime.utcnow().isoformat()
                 cur.execute("SELECT 1 FROM notes WHERE contact_id=? AND body=?", (contact_id, note_text))
@@ -1390,7 +1379,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown(f"### ✏️ {row.get('first_name','')} {row.get('last_name','')} — {row.get('company') or ''}")
     st.caption(f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}")
 
-    # Profile + Website links under header
     profile_url_header = row.get("profile_url")
     if profile_url_header:
         u = _clean_url(profile_url_header)
@@ -1539,7 +1527,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
 
 # -------------------------------------------------------------
-# MANUAL ADD CONTACT FORM (CLEAR WORKS + OPTIONAL NOTE)
+# MANUAL ADD CONTACT FORM (NO DUPLICATES)
 # -------------------------------------------------------------
 def add_contact_form(conn: sqlite3.Connection):
     st.markdown("### ➕ Add new contact manually")
@@ -1590,14 +1578,13 @@ def add_contact_form(conn: sqlite3.Connection):
             submitted = col_create.form_submit_button("Create contact")
             cleared = col_clear.form_submit_button("Clear form")
 
-        # outside form context
         if cleared:
             st.session_state["add_form_reset"] += 1
             st.rerun()
 
         if submitted:
-            if not email and not (first and last and company):
-                st.error("Please provide either an email, or first name + last name + company.")
+            if not (email or "").strip() and not ((first or "").strip() and (last or "").strip() and (company or "").strip()) and not (company or "").strip():
+                st.error("Please provide at least a company, or an email, or first+last+company.")
                 return
 
             scan_dt = datetime.utcnow().isoformat()
@@ -1606,41 +1593,136 @@ def add_contact_form(conn: sqlite3.Connection):
             status_norm = normalize_status(status) or "New"
             application_norm = normalize_application(application_raw)
 
-            conn.execute(
-                """
-                INSERT INTO contacts
-                (scan_datetime, first_name, last_name, job_title, company,
-                 street, street2, zip_code, city, state, country,
-                 phone, email, website, category, status, owner, last_touch,
-                 gender, application, product_interest, profile_url)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    scan_dt,
-                    first.strip() or None,
-                    last.strip() or None,
-                    job.strip() or None,
-                    company.strip() or None,
-                    street.strip() or None,
-                    street2.strip() or None,
-                    zipc.strip() or None,
-                    city.strip() or None,
-                    state.strip() or None,
-                    country.strip() or None,
-                    phone.strip() or None,
-                    email_norm,
-                    _clean_url(website) or None,
-                    category,
-                    status_norm,
-                    (owner or "").strip() or None,
-                    scan_dt,
-                    (gender or "").strip() or None,
-                    application_norm,
-                    (product or "").strip() or None,
-                    _clean_url(profile_url) or None,
-                ),
-            )
-            contact_id = conn.execute("SELECT id FROM contacts WHERE rowid=last_insert_rowid()").fetchone()[0]
+            cur = conn.cursor()
+            existing_id = None
+
+            if email_norm:
+                row = cur.execute(
+                    "SELECT id FROM contacts WHERE lower(trim(email))=lower(trim(?))",
+                    (email_norm,),
+                ).fetchone()
+                if row:
+                    existing_id = int(row[0])
+            else:
+                row = cur.execute(
+                    """
+                    SELECT id
+                    FROM contacts
+                    WHERE COALESCE(first_name,'') = ?
+                      AND COALESCE(last_name,'')  = ?
+                      AND COALESCE(company,'')    = ?
+                      AND (email IS NULL OR trim(email) = '')
+                    """,
+                    ((first or "").strip(), (last or "").strip(), (company or "").strip()),
+                ).fetchone()
+                if row:
+                    existing_id = int(row[0])
+
+                if not existing_id and (company or "").strip() and not (first or "").strip() and not (last or "").strip():
+                    row = cur.execute(
+                        """
+                        SELECT id
+                        FROM contacts
+                        WHERE COALESCE(company,'') = ?
+                          AND (COALESCE(first_name,'') = '' AND COALESCE(last_name,'') = '')
+                          AND (email IS NULL OR trim(email) = '')
+                        """,
+                        ((company or "").strip(),),
+                    ).fetchone()
+                    if row:
+                        existing_id = int(row[0])
+
+            if existing_id:
+                conn.execute(
+                    """
+                    UPDATE contacts SET
+                      scan_datetime=?,
+                      first_name=?,
+                      last_name=?,
+                      job_title=?,
+                      company=?,
+                      street=?,
+                      street2=?,
+                      zip_code=?,
+                      city=?,
+                      state=?,
+                      country=?,
+                      phone=?,
+                      email=?,
+                      website=?,
+                      category=?,
+                      status=?,
+                      owner=?,
+                      last_touch=?,
+                      gender=?,
+                      application=?,
+                      product_interest=?,
+                      profile_url=?
+                    WHERE id=?
+                    """,
+                    (
+                        scan_dt,
+                        (first or "").strip() or None,
+                        (last or "").strip() or None,
+                        (job or "").strip() or None,
+                        (company or "").strip() or None,
+                        (street or "").strip() or None,
+                        (street2 or "").strip() or None,
+                        (zipc or "").strip() or None,
+                        (city or "").strip() or None,
+                        (state or "").strip() or None,
+                        (country or "").strip() or None,
+                        (phone or "").strip() or None,
+                        email_norm,
+                        _clean_url(website) or None,
+                        category,
+                        status_norm,
+                        (owner or "").strip() or None,
+                        scan_dt,
+                        (gender or "").strip() or None,
+                        application_norm,
+                        (product or "").strip() or None,
+                        _clean_url(profile_url) or None,
+                        existing_id,
+                    ),
+                )
+                contact_id = existing_id
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO contacts
+                    (scan_datetime, first_name, last_name, job_title, company,
+                     street, street2, zip_code, city, state, country,
+                     phone, email, website, category, status, owner, last_touch,
+                     gender, application, product_interest, profile_url)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        scan_dt,
+                        (first or "").strip() or None,
+                        (last or "").strip() or None,
+                        (job or "").strip() or None,
+                        (company or "").strip() or None,
+                        (street or "").strip() or None,
+                        (street2 or "").strip() or None,
+                        (zipc or "").strip() or None,
+                        (city or "").strip() or None,
+                        (state or "").strip() or None,
+                        (country or "").strip() or None,
+                        (phone or "").strip() or None,
+                        email_norm,
+                        _clean_url(website) or None,
+                        category,
+                        status_norm,
+                        (owner or "").strip() or None,
+                        scan_dt,
+                        (gender or "").strip() or None,
+                        application_norm,
+                        (product or "").strip() or None,
+                        _clean_url(profile_url) or None,
+                    ),
+                )
+                contact_id = conn.execute("SELECT id FROM contacts WHERE rowid=last_insert_rowid()").fetchone()[0]
 
             if (first_note or "").strip():
                 conn.execute(
@@ -1650,7 +1732,7 @@ def add_contact_form(conn: sqlite3.Connection):
 
             conn.commit()
             backup_contacts(conn)
-            st.success("New contact created")
+            st.success("Contact saved (no duplicates)")
             st.session_state["add_form_reset"] += 1
             st.rerun()
 
@@ -1661,9 +1743,7 @@ def add_contact_form(conn: sqlite3.Connection):
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
 
-    # 🎄 Christmas snowflake background
     inject_christmas_background()
-
     check_login_two_factor_telegram()
 
     conn = get_conn()
@@ -1678,9 +1758,7 @@ def main():
         show_won_counter(conn)
 
     sidebar_import_export(conn)
-
     show_priority_lists(conn)
-
     add_contact_form(conn)
 
     q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
@@ -1721,7 +1799,6 @@ def main():
     available_cols = [c for c in export_cols if c in df.columns]
     st.session_state["export_df"] = df[available_cols].copy()
 
-    # Display table
     display_df = df[available_cols].copy()
     if "profile_url" in display_df.columns:
         display_df = display_df.rename(columns={"profile_url": "Profile URL"})
