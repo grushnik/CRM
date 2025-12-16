@@ -95,7 +95,6 @@ def inject_christmas_background():
     st.markdown(
         f"""
         <style>
-        /* Main app background */
         [data-testid="stAppViewContainer"] {{
             background-image: url("{bg_url}");
             background-repeat: repeat;
@@ -103,8 +102,6 @@ def inject_christmas_background():
             background-attachment: fixed;
             background-color: #ffffff;
         }}
-
-        /* Make inner containers transparent so the background shows through */
         .stApp,
         [data-testid="stHeader"],
         [data-testid="stToolbar"],
@@ -206,6 +203,106 @@ def flag_img(country: Any, size: int = 18) -> str:
         f"<img src='https://flagcdn.com/{iso.lower()}.svg' width='{size}' "
         f"style='vertical-align:middle;border-radius:2px;margin-left:6px;'/>"
     )
+
+
+# -------------------------------------------------------------
+# DEDUPE HELPERS
+# -------------------------------------------------------------
+def _norm(s: Any) -> str:
+    return (str(s).strip().lower() if s is not None else "").strip()
+
+
+def _norm_spaces(s: Any) -> str:
+    return re.sub(r"\s+", " ", (str(s) if s is not None else "").strip()).lower()
+
+
+def _norm_profile(url: Any) -> str:
+    u = _clean_url(url)
+    u = _norm(u)
+    if not u:
+        return ""
+    u = u.replace("www.linkedin.com", "linkedin.com")
+    u = u.split("?")[0].rstrip("/")
+    return u
+
+
+def compute_dedupe_key(first, last, company, email, profile_url) -> Optional[str]:
+    e = _norm(email)
+    if e:
+        return f"email:{e}"
+
+    li = _norm_profile(profile_url)
+    if li:
+        return f"li:{li}"
+
+    f = _norm_spaces(first)
+    l = _norm_spaces(last)
+    c = _norm_spaces(company)
+
+    if f and l and c:
+        return f"ncc:{f}|{l}|{c}"
+    if f and l:
+        return f"nl:{f}|{l}"
+    if c:
+        return f"c:{c}"
+
+    return None
+
+
+def dedupe_database(conn: sqlite3.Connection) -> int:
+    """
+    One-time cleanup:
+    - fills dedupe_key
+    - merges duplicates (keeps lowest id)
+    - moves notes + status_history to winner
+    - deletes duplicates
+    """
+    cur = conn.cursor()
+
+    rows = cur.execute(
+        "SELECT id, first_name, last_name, company, email, profile_url FROM contacts"
+    ).fetchall()
+
+    for (cid, first, last, company, email, profile_url) in rows:
+        key = compute_dedupe_key(first, last, company, email, profile_url)
+        cur.execute("UPDATE contacts SET dedupe_key=? WHERE id=?", (key, cid))
+
+    conn.commit()
+
+    dup_keys = cur.execute(
+        """
+        SELECT dedupe_key
+        FROM contacts
+        WHERE dedupe_key IS NOT NULL AND TRIM(dedupe_key) <> ''
+        GROUP BY dedupe_key
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+
+    deleted = 0
+    for (k,) in dup_keys:
+        ids = [r[0] for r in cur.execute(
+            "SELECT id FROM contacts WHERE dedupe_key=? ORDER BY id ASC", (k,)
+        ).fetchall()]
+        if len(ids) <= 1:
+            continue
+
+        winner = ids[0]
+        losers = ids[1:]
+
+        for lose_id in losers:
+            cur.execute("UPDATE notes SET contact_id=? WHERE contact_id=?", (winner, lose_id))
+            cur.execute("UPDATE status_history SET contact_id=? WHERE contact_id=?", (winner, lose_id))
+
+        cur.execute(
+            "DELETE FROM contacts WHERE id IN (" + ",".join("?" for _ in losers) + ")",
+            losers
+        )
+        deleted += len(losers)
+
+    conn.commit()
+    backup_contacts(conn)
+    return deleted
 
 
 # -------------------------------------------------------------
@@ -468,7 +565,8 @@ def init_db(conn: sqlite3.Connection):
           application TEXT,
           product_interest TEXT,
           photo TEXT,
-          profile_url TEXT
+          profile_url TEXT,
+          dedupe_key TEXT
         );
 
         CREATE TABLE IF NOT EXISTS notes (
@@ -511,10 +609,24 @@ def init_db(conn: sqlite3.Connection):
         "application": "TEXT",
         "product_interest": "TEXT",
         "country": "TEXT",
+        "dedupe_key": "TEXT",
     }
     for c, t in add_cols.items():
         if c not in cols:
             cur.execute(f"ALTER TABLE contacts ADD COLUMN {c} {t}")
+
+    # DB-level protection: unique dedupe_key (ignores NULL/empty)
+    try:
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_dedupe_key
+            ON contacts(dedupe_key)
+            WHERE dedupe_key IS NOT NULL AND TRIM(dedupe_key) <> ''
+            """
+        )
+    except Exception:
+        # if older sqlite doesn't support partial index, skip
+        pass
 
     conn.commit()
 
@@ -619,11 +731,17 @@ EXPECTED = [
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
 PROF_PAT = re.compile(r"\b(assistant|associate|full)?\s*professor\b|department chair", re.I)
-IND_PAT = re.compile(r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b", re.I)
+IND_PAT = re.compile(
+    r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b",
+    re.I,
+)
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    new_cols = {c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower()) for c in df.columns}
+    new_cols = {
+        c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower())
+        for c in df.columns
+    }
     df = df.rename(columns=new_cols)
     for c in EXPECTED:
         if c not in df.columns:
@@ -731,7 +849,10 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     first_row = df.iloc[0]
-    first_vals = ["" if (isinstance(v, float) and pd.isna(v)) else str(v).strip() for v in first_row]
+    first_vals = [
+        "" if (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+        for v in first_row
+    ]
     first_vals_lower = [v.lower() for v in first_vals]
 
     known = set(COLMAP.keys()) | set(EXPECTED)
@@ -761,12 +882,6 @@ def load_contacts_file(uploaded_file) -> pd.DataFrame:
 # UPSERT (NO DUPLICATES)
 # -------------------------------------------------------------
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
-    """
-    Prevent duplicates by:
-      - using email when available
-      - otherwise using NULL-safe (first,last,company) match
-      - if first/last missing, fall back to company-only (no-email) match
-    """
     df = normalize_columns(df).fillna("")
     df["category"] = df.apply(infer_category, axis=1)
     df["scan_datetime"] = df["scan_datetime"].apply(parse_dt)
@@ -776,7 +891,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     cur = conn.cursor()
 
     for idx, r in df.iterrows():
-        email = (r.get("email") or "").strip().lower() or None
         note_text = (r.get("notes") or "").strip()
 
         scan_dt = r.get("scan_datetime") or None
@@ -791,6 +905,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         state = (r.get("state") or "").strip() or None
         country = (r.get("country") or "").strip() or None
         phone = str(r.get("phone") or "").strip() or None
+        email = (r.get("email") or "").strip().lower() or None
         website = _clean_url(r.get("website") or "") or None
         gender = (r.get("gender") or "").strip() or None
         application = normalize_application(r.get("application"))
@@ -802,40 +917,24 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
         status_from_file = r.get("status_norm") or None
 
+        dedupe_key = compute_dedupe_key(first, last, company, email, profile_url)
+        if dedupe_key is None:
+            # skip rows with no stable identity; prevents junk duplicates
+            continue
+
         try:
             existing_id = None
             existing_status = None
 
-            if email:
-                cur.execute("SELECT id, status FROM contacts WHERE lower(trim(email))=lower(trim(?))", (email,))
-                row = cur.fetchone()
-            else:
-                row = None
-                cur.execute(
-                    """
-                    SELECT id, status
-                    FROM contacts
-                    WHERE COALESCE(first_name,'') = ?
-                      AND COALESCE(last_name,'')  = ?
-                      AND COALESCE(company,'')    = ?
-                      AND (email IS NULL OR trim(email) = '')
-                    """,
-                    (first or "", last or "", company or ""),
-                )
-                row = cur.fetchone()
+            # primary lookup by dedupe_key
+            row = cur.execute(
+                "SELECT id, status FROM contacts WHERE dedupe_key=?",
+                (dedupe_key,),
+            ).fetchone()
 
-                if not row and (company or "").strip() and not (first or "").strip() and not (last or "").strip():
-                    cur.execute(
-                        """
-                        SELECT id, status
-                        FROM contacts
-                        WHERE COALESCE(company,'') = ?
-                          AND (COALESCE(first_name,'') = '' AND COALESCE(last_name,'') = '')
-                          AND (email IS NULL OR trim(email) = '')
-                        """,
-                        (company.strip(),),
-                    )
-                    row = cur.fetchone()
+            # fallback: if no dedupe_key match but email exists (older rows), match by email
+            if not row and email:
+                row = cur.execute("SELECT id, status FROM contacts WHERE email=?", (email,)).fetchone()
 
             if row:
                 existing_id, existing_status = int(row[0]), (row[1] or "New").strip()
@@ -855,6 +954,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 cur.execute(
                     """
                     UPDATE contacts SET
+                      dedupe_key=?,
                       scan_datetime=?,
                       first_name=?,
                       last_name=?,
@@ -881,6 +981,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     WHERE id=?
                     """,
                     (
+                        dedupe_key,
                         scan_dt,
                         first,
                         last,
@@ -909,61 +1010,132 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 )
                 contact_id = existing_id
             else:
-                cur.execute(
-                    """
-                    INSERT INTO contacts (
-                      scan_datetime,
-                      first_name,
-                      last_name,
-                      job_title,
-                      company,
-                      street,
-                      street2,
-                      zip_code,
-                      city,
-                      state,
-                      country,
-                      phone,
-                      email,
-                      website,
-                      category,
-                      status,
-                      owner,
-                      last_touch,
-                      gender,
-                      application,
-                      product_interest,
-                      photo,
-                      profile_url
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        scan_dt,
-                        first,
-                        last,
-                        job,
-                        company,
-                        street,
-                        street2,
-                        zipc,
-                        city,
-                        state,
-                        country,
-                        phone,
-                        email,
-                        website,
-                        r.get("category") or "Other",
-                        final_status,
-                        owner,
-                        last_touch,
-                        gender,
-                        application,
-                        product_interest,
-                        photo,
-                        profile_url,
-                    ),
-                )
-                contact_id = cur.lastrowid
+                # insert; if unique index blocks us, update instead
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO contacts (
+                          dedupe_key,
+                          scan_datetime,
+                          first_name,
+                          last_name,
+                          job_title,
+                          company,
+                          street,
+                          street2,
+                          zip_code,
+                          city,
+                          state,
+                          country,
+                          phone,
+                          email,
+                          website,
+                          category,
+                          status,
+                          owner,
+                          last_touch,
+                          gender,
+                          application,
+                          product_interest,
+                          photo,
+                          profile_url
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            dedupe_key,
+                            scan_dt,
+                            first,
+                            last,
+                            job,
+                            company,
+                            street,
+                            street2,
+                            zipc,
+                            city,
+                            state,
+                            country,
+                            phone,
+                            email,
+                            website,
+                            r.get("category") or "Other",
+                            final_status,
+                            owner,
+                            last_touch,
+                            gender,
+                            application,
+                            product_interest,
+                            photo,
+                            profile_url,
+                        ),
+                    )
+                    contact_id = cur.lastrowid
+                except sqlite3.IntegrityError:
+                    # dedupe_key already exists → update that record
+                    row2 = cur.execute(
+                        "SELECT id, status FROM contacts WHERE dedupe_key=?",
+                        (dedupe_key,),
+                    ).fetchone()
+                    if row2:
+                        contact_id = int(row2[0])
+                        existing_status = (row2[1] or "New").strip()
+                        final_status = status_from_file or existing_status or "New"
+                        cur.execute(
+                            """
+                            UPDATE contacts SET
+                              scan_datetime=?,
+                              first_name=?,
+                              last_name=?,
+                              job_title=?,
+                              company=?,
+                              street=?,
+                              street2=?,
+                              zip_code=?,
+                              city=?,
+                              state=?,
+                              country=?,
+                              phone=?,
+                              email=?,
+                              website=?,
+                              category=?,
+                              status=?,
+                              owner=?,
+                              last_touch=?,
+                              gender=?,
+                              application=?,
+                              product_interest=?,
+                              photo=?,
+                              profile_url=?
+                            WHERE id=?
+                            """,
+                            (
+                                scan_dt,
+                                first,
+                                last,
+                                job,
+                                company,
+                                street,
+                                street2,
+                                zipc,
+                                city,
+                                state,
+                                country,
+                                phone,
+                                email,
+                                website,
+                                r.get("category") or "Other",
+                                final_status,
+                                owner,
+                                last_touch,
+                                gender,
+                                application,
+                                product_interest,
+                                photo,
+                                profile_url,
+                                contact_id,
+                            ),
+                        )
+                    else:
+                        continue
 
             if note_text:
                 ts_iso = scan_dt or datetime.utcnow().isoformat()
@@ -1446,21 +1618,27 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 )
 
             ts_iso = datetime.utcnow().isoformat()
+            email_norm = (email or "").lower().strip() or None
+            prof_norm = _clean_url(profile_url) or None
+            dedupe_key = compute_dedupe_key(first, last, company, email_norm, prof_norm)
+
             conn.execute(
                 """
                 UPDATE contacts SET
+                    dedupe_key=?,
                     first_name=?, last_name=?, job_title=?, company=?, phone=?, email=?,
                     category=?, status=?, owner=?, street=?, street2=?, city=?, state=?,
                     zip_code=?, country=?, website=?, profile_url=?, last_touch=?, gender=?, application=?, product_interest=?
                 WHERE id=?
                 """,
                 (
+                    dedupe_key,
                     first.strip() or None,
                     last.strip() or None,
                     job.strip() or None,
                     company.strip() or None,
                     phone.strip() or None,
-                    (email or "").lower().strip() or None,
+                    email_norm,
                     category,
                     (status or "New").strip(),
                     (owner or "").strip() or None,
@@ -1471,7 +1649,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     zipc.strip() or None,
                     country.strip() or None,
                     _clean_url(website) or None,
-                    _clean_url(profile_url) or None,
+                    prof_norm,
                     ts_iso,
                     gender or None,
                     normalize_application(application),
@@ -1575,7 +1753,7 @@ def add_contact_form(conn: sqlite3.Connection):
             first_note = st.text_area("Note", key=k("add_note"), placeholder="Met at conference…")
 
             col_create, col_clear = st.columns([3, 1])
-            submitted = col_create.form_submit_button("Create contact")
+            submitted = col_create.form_submit_button("Create / Update contact")
             cleared = col_clear.form_submit_button("Clear form")
 
         if cleared:
@@ -1583,96 +1761,50 @@ def add_contact_form(conn: sqlite3.Connection):
             st.rerun()
 
         if submitted:
-            if not (email or "").strip() and not ((first or "").strip() and (last or "").strip() and (company or "").strip()) and not (company or "").strip():
-                st.error("Please provide at least a company, or an email, or first+last+company.")
+            if not email and not (first and last) and not company:
+                st.error("Please provide at least one of: email, LinkedIn profile URL, (first+last), or company.")
                 return
 
             scan_dt = datetime.utcnow().isoformat()
             email_norm = (email or "").strip().lower() or None
+            profile_norm = _clean_url(profile_url) or None
 
             status_norm = normalize_status(status) or "New"
             application_norm = normalize_application(application_raw)
 
+            dedupe_key = compute_dedupe_key(first, last, company, email_norm, profile_norm)
+            if dedupe_key is None:
+                st.error("This contact has no stable identity (missing email/name/company/profile).")
+                return
+
             cur = conn.cursor()
-            existing_id = None
+            row = cur.execute("SELECT id FROM contacts WHERE dedupe_key=?", (dedupe_key,)).fetchone()
 
-            if email_norm:
-                row = cur.execute(
-                    "SELECT id FROM contacts WHERE lower(trim(email))=lower(trim(?))",
-                    (email_norm,),
-                ).fetchone()
-                if row:
-                    existing_id = int(row[0])
-            else:
-                row = cur.execute(
-                    """
-                    SELECT id
-                    FROM contacts
-                    WHERE COALESCE(first_name,'') = ?
-                      AND COALESCE(last_name,'')  = ?
-                      AND COALESCE(company,'')    = ?
-                      AND (email IS NULL OR trim(email) = '')
-                    """,
-                    ((first or "").strip(), (last or "").strip(), (company or "").strip()),
-                ).fetchone()
-                if row:
-                    existing_id = int(row[0])
-
-                if not existing_id and (company or "").strip() and not (first or "").strip() and not (last or "").strip():
-                    row = cur.execute(
-                        """
-                        SELECT id
-                        FROM contacts
-                        WHERE COALESCE(company,'') = ?
-                          AND (COALESCE(first_name,'') = '' AND COALESCE(last_name,'') = '')
-                          AND (email IS NULL OR trim(email) = '')
-                        """,
-                        ((company or "").strip(),),
-                    ).fetchone()
-                    if row:
-                        existing_id = int(row[0])
-
-            if existing_id:
+            if row:
+                contact_id = int(row[0])
                 conn.execute(
                     """
                     UPDATE contacts SET
                       scan_datetime=?,
-                      first_name=?,
-                      last_name=?,
-                      job_title=?,
-                      company=?,
-                      street=?,
-                      street2=?,
-                      zip_code=?,
-                      city=?,
-                      state=?,
-                      country=?,
-                      phone=?,
-                      email=?,
-                      website=?,
-                      category=?,
-                      status=?,
-                      owner=?,
-                      last_touch=?,
-                      gender=?,
-                      application=?,
-                      product_interest=?,
-                      profile_url=?
+                      first_name=?, last_name=?, job_title=?, company=?,
+                      street=?, street2=?, zip_code=?, city=?, state=?, country=?,
+                      phone=?, email=?, website=?, category=?, status=?, owner=?, last_touch=?,
+                      gender=?, application=?, product_interest=?, profile_url=?
                     WHERE id=?
                     """,
                     (
                         scan_dt,
-                        (first or "").strip() or None,
-                        (last or "").strip() or None,
-                        (job or "").strip() or None,
-                        (company or "").strip() or None,
-                        (street or "").strip() or None,
-                        (street2 or "").strip() or None,
-                        (zipc or "").strip() or None,
-                        (city or "").strip() or None,
-                        (state or "").strip() or None,
-                        (country or "").strip() or None,
-                        (phone or "").strip() or None,
+                        first.strip() or None,
+                        last.strip() or None,
+                        job.strip() or None,
+                        company.strip() or None,
+                        street.strip() or None,
+                        street2.strip() or None,
+                        zipc.strip() or None,
+                        city.strip() or None,
+                        state.strip() or None,
+                        country.strip() or None,
+                        phone.strip() or None,
                         email_norm,
                         _clean_url(website) or None,
                         category,
@@ -1682,34 +1814,35 @@ def add_contact_form(conn: sqlite3.Connection):
                         (gender or "").strip() or None,
                         application_norm,
                         (product or "").strip() or None,
-                        _clean_url(profile_url) or None,
-                        existing_id,
+                        profile_norm,
+                        contact_id,
                     ),
                 )
-                contact_id = existing_id
+                action = "updated"
             else:
                 conn.execute(
                     """
                     INSERT INTO contacts
-                    (scan_datetime, first_name, last_name, job_title, company,
+                    (dedupe_key, scan_datetime, first_name, last_name, job_title, company,
                      street, street2, zip_code, city, state, country,
                      phone, email, website, category, status, owner, last_touch,
                      gender, application, product_interest, profile_url)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
+                        dedupe_key,
                         scan_dt,
-                        (first or "").strip() or None,
-                        (last or "").strip() or None,
-                        (job or "").strip() or None,
-                        (company or "").strip() or None,
-                        (street or "").strip() or None,
-                        (street2 or "").strip() or None,
-                        (zipc or "").strip() or None,
-                        (city or "").strip() or None,
-                        (state or "").strip() or None,
-                        (country or "").strip() or None,
-                        (phone or "").strip() or None,
+                        first.strip() or None,
+                        last.strip() or None,
+                        job.strip() or None,
+                        company.strip() or None,
+                        street.strip() or None,
+                        street2.strip() or None,
+                        zipc.strip() or None,
+                        city.strip() or None,
+                        state.strip() or None,
+                        country.strip() or None,
+                        phone.strip() or None,
                         email_norm,
                         _clean_url(website) or None,
                         category,
@@ -1719,10 +1852,11 @@ def add_contact_form(conn: sqlite3.Connection):
                         (gender or "").strip() or None,
                         application_norm,
                         (product or "").strip() or None,
-                        _clean_url(profile_url) or None,
+                        profile_norm,
                     ),
                 )
                 contact_id = conn.execute("SELECT id FROM contacts WHERE rowid=last_insert_rowid()").fetchone()[0]
+                action = "created"
 
             if (first_note or "").strip():
                 conn.execute(
@@ -1732,7 +1866,7 @@ def add_contact_form(conn: sqlite3.Connection):
 
             conn.commit()
             backup_contacts(conn)
-            st.success("Contact saved (no duplicates)")
+            st.success(f"Contact {action} (no duplicates).")
             st.session_state["add_form_reset"] += 1
             st.rerun()
 
@@ -1749,6 +1883,13 @@ def main():
     conn = get_conn()
     init_db(conn)
     restore_from_backup_if_empty(conn)
+
+    # one-time dedupe at startup (per session)
+    if not st.session_state.get("dedupe_ran", False):
+        removed = dedupe_database(conn)
+        st.session_state["dedupe_ran"] = True
+        if removed:
+            st.toast(f"🧹 Removed {removed} duplicates", icon="✅")
 
     top_l, top_r = st.columns([3, 1])
     with top_l:
