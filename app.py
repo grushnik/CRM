@@ -3,6 +3,7 @@ import re
 import sqlite3
 import random
 import time
+import csv
 from datetime import datetime, date
 from typing import List, Any, Optional, Dict, Tuple
 
@@ -57,6 +58,52 @@ PIPELINE = [
 ]
 
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
+
+
+# -------------------------------------------------------------
+# ✅ FIX NOTES IMPORT (sanitize + optionally trim email threads)
+# -------------------------------------------------------------
+_EMAIL_THREAD_MARKERS = (
+    "\nOn ",
+    "\nFrom:",
+    "\nSent:",
+    "\nSubject:",
+    "\nTo:",
+    "\nCc:",
+)
+
+def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
+    """
+    Converts multi-line CRM-exported notes into a single-line safe note.
+    Optionally trims quoted email threads (everything after 'On ... wrote:' etc.).
+    """
+    if v is None:
+        return ""
+    s = str(v)
+
+    # normalize newlines
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+    if trim_email_threads:
+        # If this looks like an email thread, keep only the first "top" chunk.
+        # We try a few common split points.
+        for marker in _EMAIL_THREAD_MARKERS:
+            if marker in s:
+                s = s.split(marker)[0]
+                break
+
+        # also trim “wrote:” blocks if present
+        # (common pattern: "On Fri ... wrote:")
+        s = re.split(r"\nOn\s.+\swrote:\s*\n", s, maxsplit=1)[0]
+
+    # collapse whitespace/newlines into one line
+    s = re.sub(r"\n+", " ⏎ ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    if max_len and len(s) > max_len:
+        s = s[:max_len].rstrip() + "…"
+
+    return s
 
 
 # -------------------------------------------------------------
@@ -573,8 +620,6 @@ def init_db(conn: sqlite3.Connection):
         if c not in cols:
             cur.execute(f"ALTER TABLE contacts ADD COLUMN {c} {t}")
 
-    # NOTE: do NOT create UNIQUE idx on dedupe_key here.
-    # We create it safely via ensure_dedupe_index() after dedupe.
     conn.commit()
 
 
@@ -599,27 +644,15 @@ def restore_from_backup_if_empty(conn: sqlite3.Connection):
 
 
 # -------------------------------------------------------------
-# SAFE DEDUPE (fixes your IntegrityError)
+# SAFE DEDUPE
 # -------------------------------------------------------------
 def dedupe_database(conn: sqlite3.Connection) -> int:
-    """
-    One-time (or on-demand) cleanup:
-    - temporarily drops UNIQUE index on dedupe_key (so duplicates can share the key)
-    - fills dedupe_key
-    - merges duplicates (keeps lowest id)
-    - moves notes + status_history to winner
-    - deletes duplicates
-    - recreates UNIQUE index on dedupe_key
-    """
     cur = conn.cursor()
-
-    # Drop unique index so we can assign duplicate keys temporarily
     try:
         cur.execute("DROP INDEX IF EXISTS idx_contacts_dedupe_key")
     except Exception:
         pass
 
-    # Clear + rebuild keys
     cur.execute("UPDATE contacts SET dedupe_key=NULL")
     conn.commit()
 
@@ -668,7 +701,6 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
 
     conn.commit()
 
-    # Recreate UNIQUE index (now safe)
     try:
         cur.execute(
             """
@@ -679,7 +711,6 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
         )
         conn.commit()
     except Exception:
-        # older sqlite builds may not support partial indexes; ignore
         pass
 
     backup_contacts(conn)
@@ -687,9 +718,6 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
 
 
 def ensure_dedupe_index(conn: sqlite3.Connection):
-    """
-    Ensures unique idx exists. If it fails due to existing duplicates, dedupe then create.
-    """
     cur = conn.cursor()
     try:
         cur.execute(
@@ -702,7 +730,6 @@ def ensure_dedupe_index(conn: sqlite3.Connection):
         conn.commit()
         return
     except Exception:
-        # likely duplicates exist; clean then retry
         dedupe_database(conn)
         try:
             cur.execute(
@@ -948,12 +975,6 @@ def load_contacts_file(uploaded_file) -> pd.DataFrame:
 # UPSERT (NO DUPLICATES)
 # -------------------------------------------------------------
 def _find_existing_contact_id(cur: sqlite3.Cursor, dedupe_key: str, email: Optional[str], profile_url: Optional[str]) -> Optional[int]:
-    """
-    Fast, safe lookup:
-    1) email
-    2) profile_url
-    3) dedupe_key
-    """
     if email:
         row = cur.execute("SELECT id FROM contacts WHERE email=?", (email,)).fetchone()
         if row:
@@ -983,7 +1004,10 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
     for idx, r in df.iterrows():
         email = (_norm_email(r.get("email")) or None)
-        note_text = (r.get("notes") or "").strip()
+
+        # ✅ FIX NOTES IMPORT: sanitize notes coming from CRM export
+        raw_note = r.get("notes")
+        note_text = sanitize_note_text(raw_note, trim_email_threads=True)  # set False if you want full threads
 
         scan_dt = r.get("scan_datetime") or None
         first = (r.get("first_name") or "").strip() or None
@@ -1014,8 +1038,8 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             existing_id = _find_existing_contact_id(cur, dedupe_key or "", email, profile_url)
             existing_status = None
             if existing_id:
-                row = cur.execute("SELECT status FROM contacts WHERE id=?", (existing_id,)).fetchone()
-                existing_status = (row[0] if row else "New") or "New"
+                row2 = cur.execute("SELECT status FROM contacts WHERE id=?", (existing_id,)).fetchone()
+                existing_status = (row2[0] if row2 else "New") or "New"
 
             final_status = status_from_file or existing_status or "New"
 
@@ -1166,7 +1190,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
     conn.commit()
     backup_contacts(conn)
-    # keep db clean + enforce future uniqueness
     ensure_dedupe_index(conn)
     return n
 
@@ -1530,7 +1553,8 @@ def sidebar_import_export(conn: sqlite3.Connection):
 
     export_df = st.session_state.get("export_df")
     if isinstance(export_df, pd.DataFrame) and not export_df.empty:
-        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+        # ✅ FIX EXPORT: quote everything so Excel won’t break rows/cells
+        csv_bytes = export_df.to_csv(index=False, quoting=csv.QUOTE_ALL).encode("utf-8")
         st.sidebar.download_button("Download Contacts CSV (filtered)", csv_bytes, file_name="radom-contacts.csv")
 
 
@@ -1699,11 +1723,13 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     with col_add_note:
         if st.button("Add note", key=f"addnote_{contact_id}"):
             if new_note.strip():
+                # Keep what user typed (but still normalize newlines a bit for consistency)
+                cleaned = sanitize_note_text(new_note, trim_email_threads=False)
                 ts_iso = datetime.utcnow().isoformat()
                 fu_iso = next_fu.isoformat() if isinstance(next_fu, date) else None
                 conn.execute(
                     "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (contact_id, ts_iso, new_note.strip(), fu_iso),
+                    (contact_id, ts_iso, cleaned, fu_iso),
                 )
                 conn.execute("UPDATE contacts SET last_touch=? WHERE id=?", (ts_iso, contact_id))
                 conn.commit()
@@ -1796,8 +1822,9 @@ def add_contact_form(conn: sqlite3.Connection):
             cur = conn.cursor()
             existing_id = _find_existing_contact_id(cur, dedupe_key or "", email_norm, profile_norm)
 
+            cleaned_first_note = sanitize_note_text(first_note, trim_email_threads=False) if (first_note or "").strip() else ""
+
             if existing_id:
-                # Instead of creating a duplicate, update existing contact
                 conn.execute(
                     """
                     UPDATE contacts SET
@@ -1835,10 +1862,10 @@ def add_contact_form(conn: sqlite3.Connection):
                     ),
                 )
 
-                if (first_note or "").strip():
+                if cleaned_first_note:
                     conn.execute(
                         "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                        (int(existing_id), scan_dt, first_note.strip(), None),
+                        (int(existing_id), scan_dt, cleaned_first_note, None),
                     )
 
                 conn.commit()
@@ -1849,7 +1876,6 @@ def add_contact_form(conn: sqlite3.Connection):
                 st.rerun()
                 return
 
-            # Create new (no match)
             conn.execute(
                 """
                 INSERT INTO contacts
@@ -1887,10 +1913,10 @@ def add_contact_form(conn: sqlite3.Connection):
             )
             contact_id = conn.execute("SELECT id FROM contacts WHERE rowid=last_insert_rowid()").fetchone()[0]
 
-            if (first_note or "").strip():
+            if cleaned_first_note:
                 conn.execute(
                     "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (int(contact_id), scan_dt, first_note.strip(), None),
+                    (int(contact_id), scan_dt, cleaned_first_note, None),
                 )
 
             conn.commit()
@@ -1913,8 +1939,6 @@ def main():
     conn = get_conn()
     init_db(conn)
     restore_from_backup_if_empty(conn)
-
-    # Make sure dedupe protection exists (and auto-cleans if needed)
     ensure_dedupe_index(conn)
 
     top_l, top_r = st.columns([3, 1])
@@ -1966,9 +1990,16 @@ def main():
         "notes",
     ]
     available_cols = [c for c in export_cols if c in df.columns]
-    st.session_state["export_df"] = df[available_cols].copy()
 
-    display_df = df[available_cols].copy()
+    export_df = df[available_cols].copy()
+
+    # ✅ FIX EXPORT: keep export notes one-line (so Excel doesn’t show giant blocks)
+    if "notes" in export_df.columns:
+        export_df["notes"] = export_df["notes"].apply(lambda x: sanitize_note_text(x, trim_email_threads=False))
+
+    st.session_state["export_df"] = export_df
+
+    display_df = export_df.copy()
     if "profile_url" in display_df.columns:
         display_df = display_df.rename(columns={"profile_url": "Profile URL"})
     st.subheader("Contacts")
