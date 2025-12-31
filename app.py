@@ -86,13 +86,131 @@ _EMAIL_THREAD_MARKERS = (
 )
 
 def get_conn() -> sqlite3.Connection:
-    os.makedirs("data", exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
     return conn
 
+
+def _table_cols(conn: sqlite3.Connection, table: str) -> List[str]:
+    return [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, required: Dict[str, str]):
+    cols = set(_table_cols(conn, table))
+    cur = conn.cursor()
+    for c, ddl in required.items():
+        if c not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {c} {ddl}")
+    conn.commit()
+
+
+def _backfill_unit_price_cents(conn: sqlite3.Connection):
+    cols = set(_table_cols(conn, "sales"))
+    if "unit_price" in cols and "unit_price_cents" in cols:
+        conn.execute("""
+            UPDATE sales
+            SET unit_price_cents = COALESCE(unit_price_cents, CAST(ROUND(unit_price * 100.0) AS INTEGER))
+            WHERE unit_price_cents IS NULL OR unit_price_cents = 0
+        """)
+        conn.commit()
+
+
+def init_db(conn: sqlite3.Connection):
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS contacts (
+          id INTEGER PRIMARY KEY,
+          scan_datetime TEXT,
+          first_name TEXT,
+          last_name TEXT,
+          job_title TEXT,
+          company TEXT,
+          street TEXT,
+          street2 TEXT,
+          zip_code TEXT,
+          city TEXT,
+          state TEXT,
+          country TEXT,
+          phone TEXT,
+          email TEXT,
+          website TEXT,
+          category TEXT,
+          status TEXT DEFAULT 'New',
+          owner TEXT,
+          last_touch TEXT,
+          gender TEXT,
+          application TEXT,
+          product_interest TEXT,
+          photo TEXT,
+          profile_url TEXT,
+          dedupe_key TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS notes (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER,
+          ts TEXT,
+          body TEXT,
+          next_followup TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS status_history (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER,
+          ts TEXT,
+          old_status TEXT,
+          new_status TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS telegram_users (
+          username TEXT PRIMARY KEY,
+          chat_id INTEGER,
+          first_seen TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sales (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER NOT NULL,
+          sold_at TEXT NOT NULL,
+          product TEXT NOT NULL,
+          qty INTEGER NOT NULL DEFAULT 1,
+          unit_price_cents INTEGER NOT NULL DEFAULT 0,
+          currency TEXT NOT NULL DEFAULT 'USD',
+          note TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    # contacts migration (safe if DB is older)
+    _ensure_columns(conn, "contacts", {
+        "profile_url": "TEXT",
+        "photo": "TEXT",
+        "owner": "TEXT",
+        "last_touch": "TEXT",
+        "website": "TEXT",
+        "gender": "TEXT",
+        "application": "TEXT",
+        "product_interest": "TEXT",
+        "country": "TEXT",
+        "dedupe_key": "TEXT",
+    })
+
+    # sales migration (this is what fixes your crash)
+    _ensure_columns(conn, "sales", {
+        "qty": "INTEGER NOT NULL DEFAULT 1",
+        "unit_price_cents": "INTEGER NOT NULL DEFAULT 0",
+        "currency": "TEXT NOT NULL DEFAULT 'USD'",
+        "note": "TEXT",
+    })
+
+    _backfill_unit_price_cents(conn)
 
 def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
     if v is None:
@@ -1884,6 +2002,13 @@ def build_export_df(conn: sqlite3.Connection, base_df: pd.DataFrame) -> pd.DataF
     out = out.fillna("")
     return out
 
+    st.write("DB file:", DB_FILE)
+    try:
+        conn = get_conn()
+        st.write("Sales cols:", _table_cols(conn, "sales"))
+    except Exception as e:
+        st.error(f"DB debug failed: {e}")
+
 # -------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------
@@ -1944,4 +2069,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
