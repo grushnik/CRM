@@ -1,3 +1,10 @@
+# app.py — Radom CRM (Streamlit)
+# Adds:
+# 1) Sales ledger (multiple torches per won lead, with qty + unit price)
+# 2) Top counters: total torches sold + revenue current year + revenue-by-year line
+# 3) Export includes sales aggregates + readable sales lines
+# 4) Pipeline stats: Contacted→Won conversion + speed (days-to-win)
+
 import os
 import re
 import sqlite3
@@ -72,6 +79,7 @@ _EMAIL_THREAD_MARKERS = (
     "\nCc:",
 )
 
+
 def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
     """
     Converts multi-line CRM-exported notes into a single-line safe note.
@@ -85,15 +93,10 @@ def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int 
     s = s.replace("\r\n", "\n").replace("\r", "\n")
 
     if trim_email_threads:
-        # If this looks like an email thread, keep only the first "top" chunk.
-        # We try a few common split points.
         for marker in _EMAIL_THREAD_MARKERS:
             if marker in s:
                 s = s.split(marker)[0]
                 break
-
-        # also trim “wrote:” blocks if present
-        # (common pattern: "On Fri ... wrote:")
         s = re.split(r"\nOn\s.+\swrote:\s*\n", s, maxsplit=1)[0]
 
     # collapse whitespace/newlines into one line
@@ -597,6 +600,19 @@ def init_db(conn: sqlite3.Connection):
           chat_id INTEGER,
           first_seen TEXT
         );
+
+        -- ✅ Sales ledger: one row per line item
+        CREATE TABLE IF NOT EXISTS sales (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER NOT NULL,
+          sold_at TEXT NOT NULL,             -- ISO timestamp/date
+          year INTEGER NOT NULL,             -- extracted from sold_at
+          product TEXT NOT NULL,             -- e.g. "1 kW", "10 kW", ...
+          qty INTEGER NOT NULL DEFAULT 1,
+          unit_price_cents INTEGER NOT NULL DEFAULT 0,   -- store money safely
+          currency TEXT NOT NULL DEFAULT 'USD',
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
         """
     )
 
@@ -641,6 +657,270 @@ def restore_from_backup_if_empty(conn: sqlite3.Connection):
                 upsert_contacts(conn, df)
         except Exception as e:
             print(f"Backup restore failed: {e}")
+
+
+# -------------------------------------------------------------
+# SALES HELPERS (ledger + metrics + aggregation)
+# -------------------------------------------------------------
+def add_sales_lines(
+    conn: sqlite3.Connection,
+    contact_id: int,
+    sold_date: date,
+    lines: List[Dict[str, Any]],
+    currency: str = "USD",
+):
+    """
+    lines: [{"product":"10 kW","qty":2,"unit_price":125000.0}, ...]
+    unit_price is in dollars; stored as cents.
+    """
+    cur = conn.cursor()
+    sold_at_iso = datetime.combine(sold_date, datetime.min.time()).isoformat()
+    yr = sold_date.year
+
+    for ln in lines:
+        product = (ln.get("product") or "").strip()
+        qty = int(ln.get("qty") or 0)
+        unit_price = float(ln.get("unit_price") or 0.0)
+        if not product or qty <= 0:
+            continue
+        unit_cents = int(round(unit_price * 100.0))
+
+        cur.execute(
+            """
+            INSERT INTO sales(contact_id, sold_at, year, product, qty, unit_price_cents, currency)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            (contact_id, sold_at_iso, yr, product, qty, unit_cents, currency),
+        )
+
+    conn.commit()
+    backup_contacts(conn)
+
+
+def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
+    # One row per contact_id: totals + first/last sale date
+    df = pd.read_sql_query(
+        """
+        SELECT
+          s.contact_id,
+          COALESCE(SUM(s.qty),0) AS sold_qty,
+          COALESCE(SUM(s.qty * s.unit_price_cents),0) AS sold_revenue_cents,
+          MIN(s.sold_at) AS first_sold_at,
+          MAX(s.sold_at) AS last_sold_at
+        FROM sales s
+        GROUP BY s.contact_id
+        """,
+        conn,
+    )
+
+    # Readable line items string per contact
+    df_lines = pd.read_sql_query(
+        """
+        SELECT contact_id, sold_at, product, qty, unit_price_cents
+        FROM sales
+        ORDER BY sold_at ASC, id ASC
+        """,
+        conn,
+    )
+
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "contact_id", "sold_qty", "sold_revenue_cents", "first_sold_at", "last_sold_at", "sales_lines", "sold_revenue_usd"
+        ])
+
+    if df_lines.empty:
+        df["sales_lines"] = ""
+        df["sold_revenue_usd"] = df["sold_revenue_cents"] / 100.0
+        return df
+
+    def fmt_line(r):
+        d = (str(r["sold_at"]) or "")[:10]
+        price = (int(r["unit_price_cents"]) / 100.0)
+        return f"{d}: {r['product']} x{int(r['qty'])} @ ${price:,.0f}"
+
+    lines = (
+        df_lines.assign(_l=df_lines.apply(fmt_line, axis=1))
+        .groupby("contact_id")["_l"]
+        .apply(lambda s: " | ".join(s.tolist()))
+        .reset_index(name="sales_lines")
+    )
+
+    df = df.merge(lines, on="contact_id", how="left")
+    df["sales_lines"] = df["sales_lines"].fillna("")
+    df["sold_revenue_usd"] = df["sold_revenue_cents"] / 100.0
+    return df
+
+
+def get_sales_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
+    df_qty = pd.read_sql_query("SELECT COALESCE(SUM(qty),0) AS n FROM sales", conn)
+    total_qty = int(df_qty.iloc[0]["n"]) if not df_qty.empty else 0
+
+    df_rev = pd.read_sql_query(
+        """
+        SELECT year, COALESCE(SUM(qty * unit_price_cents),0) AS cents
+        FROM sales
+        GROUP BY year
+        ORDER BY year
+        """,
+        conn,
+    )
+    rev_by_year = {int(r["year"]): int(r["cents"]) / 100.0 for _, r in df_rev.iterrows()} if not df_rev.empty else {}
+
+    df_companies = pd.read_sql_query(
+        """
+        SELECT DISTINCT TRIM(c.company) AS company
+        FROM sales s
+        JOIN contacts c ON c.id = s.contact_id
+        WHERE c.company IS NOT NULL AND TRIM(c.company) <> ''
+        ORDER BY company
+        """,
+        conn,
+    )
+    companies = df_companies["company"].dropna().tolist() if not df_companies.empty else []
+
+    return {"total_qty": total_qty, "rev_by_year": rev_by_year, "companies": companies}
+
+
+def show_sales_counters(conn: sqlite3.Connection):
+    m = get_sales_metrics(conn)
+    total_qty = m["total_qty"]
+    rev_by_year = m["rev_by_year"]
+    companies = m["companies"]
+
+    current_year = datetime.now().year
+    rev_current = float(rev_by_year.get(current_year, 0.0))
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown(
+            f"""
+            <div style="
+                text-align:right;
+                padding:8px 12px;
+                border-radius:12px;
+                background: linear-gradient(135deg, #8b2cff 0%, #5a22ff 45%, #a100ff 100%);
+                color:#fff;
+                font-family:system-ui, sans-serif;
+                box-shadow: 0 8px 18px rgba(130, 46, 255, 0.25);
+            ">
+                <div style="font-size:12px; opacity:0.85; letter-spacing:0.2px;">Torches sold (total)</div>
+                <div style="font-size:34px; font-weight:800; line-height:1;">{total_qty}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with c2:
+        st.markdown(
+            f"""
+            <div style="
+                text-align:right;
+                padding:8px 12px;
+                border-radius:12px;
+                background: linear-gradient(135deg, #00b894 0%, #0984e3 55%, #6c5ce7 100%);
+                color:#fff;
+                font-family:system-ui, sans-serif;
+                box-shadow: 0 8px 18px rgba(9, 132, 227, 0.22);
+            ">
+                <div style="font-size:12px; opacity:0.85; letter-spacing:0.2px;">Revenue {current_year} (USD)</div>
+                <div style="font-size:28px; font-weight:800; line-height:1;">${rev_current:,.0f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if rev_by_year:
+        years_line = " • ".join([f"{y}: ${rev_by_year[y]:,.0f}" for y in sorted(rev_by_year.keys())])
+        st.caption("Revenue by year: " + years_line)
+    else:
+        st.caption("Revenue by year: none yet")
+
+    if companies:
+        st.caption("Sold to: " + " • ".join(companies))
+    else:
+        st.caption("Sold to: no customers yet")
+
+
+# -------------------------------------------------------------
+# CONVERSION + SPEED METRICS (Contacted → Won)
+# -------------------------------------------------------------
+def get_first_status_times(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """
+        SELECT
+          contact_id,
+          MIN(CASE WHEN new_status='Contacted' THEN ts END) AS first_contacted_ts,
+          MIN(CASE WHEN new_status='Won' THEN ts END) AS first_won_ts
+        FROM status_history
+        GROUP BY contact_id
+        """,
+        conn,
+    )
+
+
+def get_conversion_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
+    contacts = pd.read_sql_query("SELECT id, status, scan_datetime FROM contacts", conn)
+    hist = get_first_status_times(conn)
+    sales_agg = get_sales_agg(conn)[["contact_id", "first_sold_at"]].rename(columns={"contact_id": "id"})
+
+    df = contacts.merge(hist, how="left", left_on="id", right_on="contact_id")
+    df.drop(columns=["contact_id"], inplace=True, errors="ignore")
+    df = df.merge(sales_agg, how="left", on="id")
+
+    # counts as contacted if they ever hit Contacted, or their current status is beyond New
+    df["status"] = df["status"].fillna("New").astype(str).str.strip()
+    df["is_contacted"] = df["first_contacted_ts"].notna() | df["status"].isin(
+        ["Contacted", "Meeting", "Quoted", "Won", "Lost", "Nurture", "Pending", "On hold", "Irrelevant"]
+    )
+
+    df_contacted = df[df["is_contacted"]].copy()
+
+    # define win moment: prefer first sale date; else first time status became Won
+    df_contacted["win_ts"] = df_contacted["first_sold_at"].fillna(df_contacted["first_won_ts"])
+
+    contacted_n = int(df_contacted.shape[0])
+    won_n = int(df_contacted["win_ts"].notna().sum())
+    conv_rate = (won_n / contacted_n * 100.0) if contacted_n else 0.0
+
+    # time to win (days): first_contacted_ts, fallback scan_datetime
+    df_contacted["contact_ts"] = df_contacted["first_contacted_ts"].fillna(df_contacted["scan_datetime"])
+    df_contacted["contact_ts"] = pd.to_datetime(df_contacted["contact_ts"], errors="coerce")
+    df_contacted["win_ts"] = pd.to_datetime(df_contacted["win_ts"], errors="coerce")
+
+    tt = df_contacted[df_contacted["contact_ts"].notna() & df_contacted["win_ts"].notna()].copy()
+    tt["days_to_win"] = (tt["win_ts"] - tt["contact_ts"]).dt.total_seconds() / 86400.0
+    tt = tt[tt["days_to_win"] >= 0]
+
+    median_days = float(tt["days_to_win"].median()) if not tt.empty else None
+    mean_days = float(tt["days_to_win"].mean()) if not tt.empty else None
+
+    return {
+        "contacted_n": contacted_n,
+        "won_n": won_n,
+        "conv_rate": conv_rate,
+        "median_days": median_days,
+        "mean_days": mean_days,
+        "tt_df": tt[["id", "days_to_win"]].copy() if not tt.empty else pd.DataFrame(columns=["id", "days_to_win"]),
+    }
+
+
+def show_pipeline_stats(conn: sqlite3.Connection):
+    st.subheader("📈 Pipeline performance")
+    m = get_conversion_metrics(conn)
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Contacted leads", m["contacted_n"])
+    k2.metric("Won from contacted", m["won_n"])
+    k3.metric("Contacted → Won", f"{m['conv_rate']:.1f}%")
+    k4.metric("Median days to win", "—" if m["median_days"] is None else f"{m['median_days']:.1f}")
+
+    if m["mean_days"] is not None:
+        st.caption(f"Average days to win: {m['mean_days']:.1f}")
+
+    if not m["tt_df"].empty:
+        st.caption("Time-to-win (days) — by contact id")
+        st.dataframe(m["tt_df"].sort_values("days_to_win"), use_container_width=True, hide_index=True)
 
 
 # -------------------------------------------------------------
@@ -692,6 +972,7 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
         for lose_id in losers:
             cur.execute("UPDATE notes SET contact_id=? WHERE contact_id=?", (winner, lose_id))
             cur.execute("UPDATE status_history SET contact_id=? WHERE contact_id=?", (winner, lose_id))
+            cur.execute("UPDATE sales SET contact_id=? WHERE contact_id=?", (winner, lose_id))
 
         cur.execute(
             "DELETE FROM contacts WHERE id IN (" + ",".join("?" for _ in losers) + ")",
@@ -1005,9 +1286,8 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     for idx, r in df.iterrows():
         email = (_norm_email(r.get("email")) or None)
 
-        # ✅ FIX NOTES IMPORT: sanitize notes coming from CRM export
         raw_note = r.get("notes")
-        note_text = sanitize_note_text(raw_note, trim_email_threads=True)  # set False if you want full threads
+        note_text = sanitize_note_text(raw_note, trim_email_threads=True)
 
         scan_dt = r.get("scan_datetime") or None
         first = (r.get("first_name") or "").strip() or None
@@ -1287,47 +1567,6 @@ def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status:
 
 
 # -------------------------------------------------------------
-# WON COUNTER (VIOLET)
-# -------------------------------------------------------------
-def show_won_counter(conn: sqlite3.Connection):
-    df_count = pd.read_sql_query("SELECT COUNT(*) AS n FROM contacts WHERE status='Won'", conn)
-    n = int(df_count.iloc[0]["n"]) if not df_count.empty else 0
-
-    df_companies = pd.read_sql_query(
-        """
-        SELECT DISTINCT TRIM(company) AS company
-        FROM contacts
-        WHERE status='Won' AND company IS NOT NULL AND TRIM(company) <> ''
-        ORDER BY company
-        """,
-        conn,
-    )
-    companies = df_companies["company"].dropna().tolist() if not df_companies.empty else []
-
-    st.markdown(
-        f"""
-        <div style="
-            text-align:right;
-            padding:8px 12px;
-            border-radius:12px;
-            background: linear-gradient(135deg, #8b2cff 0%, #5a22ff 45%, #a100ff 100%);
-            color:#fff;
-            font-family:system-ui, sans-serif;
-            box-shadow: 0 8px 18px rgba(130, 46, 255, 0.25);
-        ">
-            <div style="font-size:12px; opacity:0.85; letter-spacing:0.2px;">Sold systems</div>
-            <div style="font-size:34px; font-weight:800; line-height:1;">{n}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if companies:
-        st.caption("Sold to: " + " • ".join(companies))
-    else:
-        st.caption("Sold to: no customers yet")
-
-
-# -------------------------------------------------------------
 # HOT / POTENTIAL / COLD OVERVIEW (HTML COMPONENTS)
 # -------------------------------------------------------------
 def _render_lead_list(title_html: str, df: pd.DataFrame):
@@ -1553,7 +1792,6 @@ def sidebar_import_export(conn: sqlite3.Connection):
 
     export_df = st.session_state.get("export_df")
     if isinstance(export_df, pd.DataFrame) and not export_df.empty:
-        # ✅ FIX EXPORT: quote everything so Excel won’t break rows/cells
         csv_bytes = export_df.to_csv(index=False, quoting=csv.QUOTE_ALL).encode("utf-8")
         st.sidebar.download_button("Download Contacts CSV (filtered)", csv_bytes, file_name="radom-contacts.csv")
 
@@ -1583,7 +1821,7 @@ def filters_ui():
 
 
 # -------------------------------------------------------------
-# CONTACT EDITOR + NOTES
+# CONTACT EDITOR + NOTES + SALES
 # -------------------------------------------------------------
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
@@ -1601,6 +1839,8 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     if website_header:
         w = _clean_url(website_header)
         st.markdown(f"🌐 Website: [{w}]({w})")
+
+    old_status_outer = (row.get("status") or "New").strip()
 
     with st.form(f"edit_{contact_id}"):
         col1, col2, col3 = st.columns(3)
@@ -1646,16 +1886,62 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         website = st.text_input("Website", row.get("website") or "")
         profile_url = st.text_input("Profile URL", row.get("profile_url") or "")
 
+        # ✅ If status becomes Won, require sales lines
+        becoming_won = (old_status_outer != "Won" and (status or "").strip() == "Won")
+        sale_lines: List[Dict[str, Any]] = []
+        sold_date: Optional[date] = None
+
+        if becoming_won:
+            st.markdown("### 💰 Sale details (required for Won)")
+            sold_date = st.date_input("Sale date", value=date.today(), key=f"sold_date_{contact_id}")
+            st.caption("Add the torches sold in this deal (product + qty + unit price).")
+
+            for i in range(1, 5):
+                cA, cB, cC = st.columns([2, 1, 1])
+                with cA:
+                    prod = st.selectbox(
+                        f"Product #{i}",
+                        [""] + PRODUCTS,
+                        key=f"sale_prod_{contact_id}_{i}",
+                    )
+                with cB:
+                    qty = st.number_input(
+                        f"Qty #{i}",
+                        min_value=0,
+                        step=1,
+                        value=0,
+                        key=f"sale_qty_{contact_id}_{i}",
+                    )
+                with cC:
+                    price = st.number_input(
+                        f"Unit price (USD) #{i}",
+                        min_value=0.0,
+                        step=1000.0,
+                        value=0.0,
+                        key=f"sale_price_{contact_id}_{i}",
+                    )
+
+                if prod and int(qty) > 0:
+                    sale_lines.append({"product": prod, "qty": int(qty), "unit_price": float(price)})
+
         col_save, col_delete = st.columns([3, 1])
         saved = col_save.form_submit_button("Save changes")
         delete_pressed = col_delete.form_submit_button("🗑️ Delete this contact")
 
         if saved:
             cur = conn.cursor()
-            if (row.get("status") or "New").strip() != (status or "New").strip():
+            old_status = old_status_outer
+            new_status_norm = (status or "New").strip()
+
+            if old_status != "Won" and new_status_norm == "Won":
+                if not sale_lines:
+                    st.error("To set status to Won, please enter at least one sold torch line (product + qty + price).")
+                    st.stop()
+
+            if old_status != new_status_norm:
                 cur.execute(
                     "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
-                    (contact_id, datetime.utcnow().isoformat(), (row.get("status") or "New").strip(), (status or "New").strip()),
+                    (contact_id, datetime.utcnow().isoformat(), old_status, new_status_norm),
                 )
 
             ts_iso = datetime.utcnow().isoformat()
@@ -1681,7 +1967,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     phone.strip() or None,
                     email_norm,
                     category,
-                    (status or "New").strip(),
+                    new_status_norm,
                     (owner or "").strip() or None,
                     street.strip() or None,
                     street2.strip() or None,
@@ -1700,6 +1986,11 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 ),
             )
             conn.commit()
+
+            # ✅ Record sales exactly when becoming Won
+            if old_status != "Won" and new_status_norm == "Won":
+                add_sales_lines(conn, contact_id, sold_date or date.today(), sale_lines, currency="USD")
+
             backup_contacts(conn)
             ensure_dedupe_index(conn)
             st.success("Saved")
@@ -1723,7 +2014,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     with col_add_note:
         if st.button("Add note", key=f"addnote_{contact_id}"):
             if new_note.strip():
-                # Keep what user typed (but still normalize newlines a bit for consistency)
                 cleaned = sanitize_note_text(new_note, trim_email_threads=False)
                 ts_iso = datetime.utcnow().isoformat()
                 fu_iso = next_fu.isoformat() if isinstance(next_fu, date) else None
@@ -1747,6 +2037,22 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
     notes_df = get_notes(conn, contact_id)
     st.dataframe(notes_df, use_container_width=True)
+
+    # ✅ Sales history display
+    st.markdown("#### 🧾 Sales history")
+    sales_df = pd.read_sql_query(
+        """
+        SELECT sold_at, year, product, qty,
+               unit_price_cents/100.0 AS unit_price_usd,
+               (qty * unit_price_cents)/100.0 AS line_total_usd
+        FROM sales
+        WHERE contact_id=?
+        ORDER BY sold_at DESC, id DESC
+        """,
+        conn,
+        params=(contact_id,),
+    )
+    st.dataframe(sales_df, use_container_width=True, hide_index=True)
 
 
 # -------------------------------------------------------------
@@ -1946,10 +2252,11 @@ def main():
         st.title(APP_TITLE)
         st.caption("Upload leads → categorize → work the pipeline → export.")
     with top_r:
-        show_won_counter(conn)
+        show_sales_counters(conn)
 
     sidebar_import_export(conn)
 
+    show_pipeline_stats(conn)
     show_priority_lists(conn)
 
     add_contact_form(conn)
@@ -1991,20 +2298,39 @@ def main():
     ]
     available_cols = [c for c in export_cols if c in df.columns]
 
-    export_df = df[available_cols].copy()
+    # ✅ Build export with internal id, then attach sales aggregates, then drop id
+    export_internal = df[["id"] + available_cols].copy()
 
-    # ✅ FIX EXPORT: keep export notes one-line (so Excel doesn’t show giant blocks)
-    if "notes" in export_df.columns:
-        export_df["notes"] = export_df["notes"].apply(lambda x: sanitize_note_text(x, trim_email_threads=False))
+    if "notes" in export_internal.columns:
+        export_internal["notes"] = export_internal["notes"].apply(lambda x: sanitize_note_text(x, trim_email_threads=False))
 
+    sales_agg = get_sales_agg(conn)
+    if not sales_agg.empty:
+        export_internal = export_internal.merge(sales_agg, how="left", left_on="id", right_on="contact_id")
+        export_internal.drop(columns=["contact_id"], inplace=True, errors="ignore")
+
+    # ensure sales columns exist
+    for c in ["sold_qty", "sold_revenue_usd", "first_sold_at", "last_sold_at", "sales_lines"]:
+        if c not in export_internal.columns:
+            export_internal[c] = ""
+
+    export_internal["sold_qty"] = export_internal["sold_qty"].fillna(0).astype(int)
+    export_internal["sold_revenue_usd"] = export_internal["sold_revenue_usd"].fillna(0.0)
+    export_internal["first_sold_at"] = export_internal["first_sold_at"].fillna("")
+    export_internal["last_sold_at"] = export_internal["last_sold_at"].fillna("")
+    export_internal["sales_lines"] = export_internal["sales_lines"].fillna("")
+
+    export_df = export_internal.drop(columns=["id"], errors="ignore")
     st.session_state["export_df"] = export_df
 
+    # Display table
     display_df = export_df.copy()
     if "profile_url" in display_df.columns:
         display_df = display_df.rename(columns={"profile_url": "Profile URL"})
     st.subheader("Contacts")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
+    # Contact picker still uses df with id
     options = [
         (int(r.id), f"{(r.first_name or '').strip()} {(r.last_name or '').strip()} — {(r.company or '').strip()}")
         for r in df[["id", "first_name", "last_name", "company"]].itertuples(index=False)
