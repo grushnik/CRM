@@ -62,6 +62,7 @@ PIPELINE = [
 
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
 
+
 # -------------------------------------------------------------
 # dtype-safe numeric helpers
 # -------------------------------------------------------------
@@ -214,7 +215,6 @@ def init_db(conn: sqlite3.Connection):
         """
     )
 
-    # contacts migration
     _ensure_columns(
         conn,
         "contacts",
@@ -232,7 +232,6 @@ def init_db(conn: sqlite3.Connection):
         },
     )
 
-    # sales migration
     _ensure_columns(
         conn,
         "sales",
@@ -491,7 +490,6 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     if username.lower() in cache:
         return cache[username.lower()]
 
-    # DB cache
     try:
         conn = get_conn()
         init_db(conn)
@@ -505,7 +503,6 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     except Exception:
         pass
 
-    # Telegram updates scan
     try:
         resp = requests.get(_tg_api("getUpdates"), params={"limit": 100}, timeout=15)
         if resp.status_code != 200:
@@ -578,7 +575,6 @@ def check_login_two_factor_telegram():
 
     st.sidebar.header("🔐 Login")
 
-    # ✅ username FIRST, then password
     tg_user = st.sidebar.text_input("Telegram username (without @)", key="login_tg_user").strip().lstrip("@")
     pwd = st.sidebar.text_input("Password", type="password", key="login_pwd")
 
@@ -625,7 +621,7 @@ def check_login_two_factor_telegram():
         st.stop()
 
     st.sidebar.caption("Enter the 6-digit code sent to your Telegram private chat with the bot.")
-    code_in = st.sidebar.text_input("Enter 6-digit code", max_chars=6)
+    code_in = st.sidebar.text_input("Enter 6-digit code", max_chars=6, key="otp_in")
 
     colv1, colv2 = st.sidebar.columns(2)
     with colv1:
@@ -1180,6 +1176,7 @@ def query_contacts(
     app_filter: List[str],
     prod_filter: List[str],
 ) -> pd.DataFrame:
+    # ✅ FIX: make filters consistent by using lower() comparisons
     sql = """
         SELECT *,
                (SELECT MAX(ts) FROM notes n WHERE n.contact_id = c.id) AS last_note_ts
@@ -1189,8 +1186,15 @@ def query_contacts(
     params: List[Any] = []
 
     if q:
-        like = f"%{q}%"
-        sql += " AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR company LIKE ?)"
+        like = f"%{q.strip().lower()}%"
+        sql += """
+            AND (
+                lower(COALESCE(first_name,'')) LIKE ?
+                OR lower(COALESCE(last_name,'')) LIKE ?
+                OR lower(COALESCE(email,'')) LIKE ?
+                OR lower(COALESCE(company,'')) LIKE ?
+            )
+        """
         params += [like, like, like, like]
 
     if cats:
@@ -1202,8 +1206,8 @@ def query_contacts(
         params += stats
 
     if state_like:
-        sql += " AND state LIKE ?"
-        params.append(f"%{state_like}%")
+        sql += " AND lower(COALESCE(state,'')) LIKE ?"
+        params.append(f"%{state_like.strip().lower()}%")
 
     if app_filter:
         sql += " AND application IN (" + ",".join("?" for _ in app_filter) + ")"
@@ -1213,6 +1217,7 @@ def query_contacts(
         sql += " AND product_interest IN (" + ",".join("?" for _ in prod_filter) + ")"
         params += prod_filter
 
+    sql += " ORDER BY COALESCE(last_name,''), COALESCE(first_name,''), id DESC"
     return pd.read_sql_query(sql, conn, params=params)
 
 
@@ -1304,7 +1309,6 @@ def delete_sale_line(conn: sqlite3.Connection, sale_id: int):
 
 
 def get_sales_for_contact(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
-    # If sales table doesn't exist yet, return empty df with expected columns
     try:
         cols = _table_cols(conn, "sales")
     except Exception:
@@ -1647,7 +1651,6 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
 def show_priority_lists(conn: sqlite3.Connection):
     st.subheader("Customer overview")
 
-    # dashboard strip ON TOP of overview (as requested)
     show_dashboard_strip(conn)
     st.markdown("---")
 
@@ -1661,7 +1664,6 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     df_all["status"] = df_all["status"].fillna("New").astype(str).str.strip()
 
-    # Quick move lead between buckets (single row, aligned)
     st.caption("⚡ Quick move lead between buckets")
     options = {
         int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {r.company or ''} ({r.email or ''})"
@@ -1670,13 +1672,13 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     q1, q2, q3 = st.columns([2.6, 1.2, 1.2])
     with q1:
-        picked = st.selectbox("Pick lead", list(options.keys()), format_func=lambda cid: options.get(cid, str(cid)))
+        picked = st.selectbox("Pick lead", list(options.keys()), format_func=lambda cid: options.get(cid, str(cid)), key="ov_pick_lead")
     with q2:
-        new_status = st.selectbox("New status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0)
+        new_status = st.selectbox("New status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0, key="ov_new_status")
     with q3:
-        st.write("")  # spacing
         st.write("")
-        if st.button("Move / Update status", use_container_width=True):
+        st.write("")
+        if st.button("Move / Update status", use_container_width=True, key="ov_move_status"):
             update_contact_status(conn, int(picked), str(new_status))
             st.success("Updated.")
             st.rerun()
@@ -1745,25 +1747,31 @@ def sidebar_import_export(conn: sqlite3.Connection):
 
 
 # -------------------------------------------------------------
-# FILTERS UI
+# FILTERS UI  ✅ FIXED (keys!)
 # -------------------------------------------------------------
 def filters_ui():
     st.subheader("Filters")
-    q = st.text_input("Search (name, email, company)", "")
+
+    q = st.text_input("Search (name, email, company)", "", key="flt_q")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        cats = st.multiselect("Category", ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"], [])
+        cats = st.multiselect(
+            "Category",
+            ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"],
+            [],
+            key="flt_cats",
+        )
     with c2:
-        stats = st.multiselect("Status", PIPELINE, [])
+        stats = st.multiselect("Status", PIPELINE, [], key="flt_stats")
     with c3:
-        st_like = st.text_input("State/Province contains", "")
+        st_like = st.text_input("State/Province contains", "", key="flt_state_like")
 
     c4, c5 = st.columns(2)
     with c4:
-        app_filter = st.multiselect("Application", APPLICATIONS, [])
+        app_filter = st.multiselect("Application", APPLICATIONS, [], key="flt_apps")
     with c5:
-        prod_filter = st.multiselect("Product type interest", PRODUCTS, [])
+        prod_filter = st.multiselect("Product type interest", PRODUCTS, [], key="flt_prods")
 
     return q, cats, stats, st_like, app_filter, prod_filter
 
@@ -2026,10 +2034,7 @@ def revenue_histogram(conn: sqlite3.Connection):
     yearly = get_sales_yearly_totals(conn)
     actual = {int(r.year): float(r.revenue_usd) for r in yearly.itertuples(index=False)} if not yearly.empty else {}
 
-    # requested projections
-    projections = {
-        2026: 200000.0,
-    }
+    projections = {2026: 200000.0}
 
     years = sorted(set(actual.keys()) | set(projections.keys()) | {2025, 2026})
 
@@ -2042,17 +2047,9 @@ def revenue_histogram(conn: sqlite3.Connection):
             val = float(projections.get(y, 0.0))
             is_projected = (y in projections)
 
-        rows.append(
-            {
-                "Year": str(y) + (" (proj)" if is_projected else ""),
-                "Revenue": float(val),
-                "_year_num": int(y),
-            }
-        )
+        rows.append({"Year": str(y) + (" (proj)" if is_projected else ""), "Revenue": float(val), "_year_num": int(y)})
 
     chart_df = pd.DataFrame(rows).sort_values("_year_num")[["Year", "Revenue"]].reset_index(drop=True)
-
-    # Vertical bars (histogram style)
     st.bar_chart(chart_df, x="Year", y="Revenue")
 
     if 2025 in actual:
@@ -2060,40 +2057,13 @@ def revenue_histogram(conn: sqlite3.Connection):
     else:
         st.caption("2025 has no sales in DB yet (chart shows 0 unless you add sales lines).")
 
-def show_dashboard_strip(conn: sqlite3.Connection):
-    # Wrapper so older/newer code doesn't break.
-    # If show_sales_counters exists, use it.
-    if "show_sales_counters" in globals():
-        show_sales_counters(conn)
-    else:
-        st.info("Sales counters are not available (missing show_sales_counters).")
-
 
 def dashboard(conn: sqlite3.Connection):
     st.subheader("Dashboard")
-
-    c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1.2])
-    with c1:
-        show_dashboard_strip(conn)
-
-    stats = get_conversion_stats(conn)
-    with c2:
-        st.metric("Contacted leads", stats.get("contacted_count", 0))
-    with c3:
-        st.metric("Won leads", stats.get("won_count", 0))
-    with c4:
-        conv = float(stats.get("conversion_rate", 0.0) or 0.0)
-        st.metric("Contacted → Won", f"{conv * 100:.1f}%")
-
-    avg_days = stats.get("avg_days_contacted_to_win")
-    speed_n = stats.get("speed_n", 0)
-    if avg_days is not None:
-        st.caption(f"Avg speed (first Contacted → first Win/Sale): **{avg_days:.1f} days** (n={speed_n})")
-    else:
-        st.caption("Speed metric: not enough status-history data yet (needs Contacted timestamps).")
-
+    show_dashboard_strip(conn)
     st.markdown("---")
     revenue_histogram(conn)
+
 
 # -------------------------------------------------------------
 # MAIN
@@ -2110,7 +2080,6 @@ def main():
     check_login_two_factor_telegram()
 
     st.title(APP_TITLE)
-
     sidebar_import_export(conn)
 
     # ✅ Tab order: Overview first, Contacts second, Dashboard third
@@ -2118,9 +2087,6 @@ def main():
 
     with tab_overview:
         show_priority_lists(conn)
-
-    with tab_dashboard:
-        dashboard(conn)
 
     with tab_contacts:
         q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
@@ -2146,21 +2112,44 @@ def main():
 
         st.dataframe(view, use_container_width=True, hide_index=True)
 
-        options = {
-            int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {r.company or ''} ({r.email or ''})"
-            for r in df.itertuples(index=False)
-        }
+        # ✅ FIX: robust picker that resets when filters change
+        df2 = df.copy()
+        df2["id"] = safe_int_series(df2["id"], 0)
+
+        options = []
+        labels = []
+        for r in df2.itertuples(index=False):
+            cid = int(r.id)
+            name = f"{(r.first_name or '')} {(r.last_name or '')}".strip() or f"ID {cid}"
+            company = (r.company or "").strip()
+            email = (r.email or "").strip()
+            extra = " — ".join([x for x in [company, email] if x])
+            label = f"{name} — {extra}" if extra else name
+            options.append(cid)
+            labels.append(label)
+
+        if not options:
+            st.info("No contacts match filters.")
+            return
+
+        ss = st.session_state
+        if ss.get("picked_contact_id") not in options:
+            ss["picked_contact_id"] = options[0]
+
         picked = st.selectbox(
             "Select contact to edit",
-            list(options.keys()),
-            format_func=lambda cid: options.get(cid, str(cid)),
+            options,
+            index=options.index(ss["picked_contact_id"]),
+            format_func=lambda cid: labels[options.index(cid)],
+            key="picked_contact_id",
         )
 
-        row = df[df["id"] == picked].iloc[0]
+        row = df2[df2["id"] == int(picked)].iloc[0]
         contact_editor(conn, row)
+
+    with tab_dashboard:
+        dashboard(conn)
 
 
 if __name__ == "__main__":
     main()
-
-
