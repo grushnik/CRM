@@ -85,6 +85,15 @@ _EMAIL_THREAD_MARKERS = (
     "\nCc:",
 )
 
+def get_conn() -> sqlite3.Connection:
+    os.makedirs("data", exist_ok=True)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    return conn
+
+
 def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
     if v is None:
         return ""
@@ -356,6 +365,124 @@ def init_db(conn: sqlite3.Connection):
         );
         """
     )
+
+    def _ensure_columns(conn: sqlite3.Connection, table: str, required: Dict[str, str]):
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cur.fetchall()]
+    for c, ddl in required.items():
+        if c not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {c} {ddl}")
+    conn.commit()
+
+def init_db(conn: sqlite3.Connection):
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS contacts (
+          id INTEGER PRIMARY KEY,
+          scan_datetime TEXT,
+          first_name TEXT,
+          last_name TEXT,
+          job_title TEXT,
+          company TEXT,
+          street TEXT,
+          street2 TEXT,
+          zip_code TEXT,
+          city TEXT,
+          state TEXT,
+          country TEXT,
+          phone TEXT,
+          email TEXT,
+          website TEXT,
+          category TEXT,
+          status TEXT DEFAULT 'New',
+          owner TEXT,
+          last_touch TEXT,
+          gender TEXT,
+          application TEXT,
+          product_interest TEXT,
+          photo TEXT,
+          profile_url TEXT,
+          dedupe_key TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS notes (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER,
+          ts TEXT,
+          body TEXT,
+          next_followup TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS status_history (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER,
+          ts TEXT,
+          old_status TEXT,
+          new_status TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS telegram_users (
+          username TEXT PRIMARY KEY,
+          chat_id INTEGER,
+          first_seen TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sales (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER NOT NULL,
+          sold_at TEXT NOT NULL,
+          product TEXT NOT NULL,
+          qty INTEGER NOT NULL DEFAULT 1,
+          unit_price_cents INTEGER NOT NULL,
+          currency TEXT NOT NULL DEFAULT 'USD',
+          note TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    def _backfill_unit_price_cents(conn: sqlite3.Connection):
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(sales)").fetchall()]
+    if "unit_price" in cols and "unit_price_cents" in cols:
+        conn.execute("""
+            UPDATE sales
+            SET unit_price_cents = COALESCE(unit_price_cents, CAST(ROUND(unit_price * 100.0) AS INTEGER))
+            WHERE unit_price_cents IS NULL OR unit_price_cents = 0
+        """)
+        conn.commit()
+
+    # Existing contacts migration (yours)
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(contacts)")
+    cols = [row[1] for row in cur.fetchall()]
+    add_cols = {
+        "profile_url": "TEXT",
+        "photo": "TEXT",
+        "owner": "TEXT",
+        "last_touch": "TEXT",
+        "website": "TEXT",
+        "gender": "TEXT",
+        "application": "TEXT",
+        "product_interest": "TEXT",
+        "country": "TEXT",
+        "dedupe_key": "TEXT",
+    }
+    for c, t in add_cols.items():
+        if c not in cols:
+            cur.execute(f"ALTER TABLE contacts ADD COLUMN {c} {t}")
+    conn.commit()
+
+    # ✅ NEW: sales table migration (fixes your crash)
+    _ensure_columns(conn, "sales", {
+        "qty": "INTEGER NOT NULL DEFAULT 1",
+        "unit_price_cents": "INTEGER NOT NULL DEFAULT 0",
+        "currency": "TEXT NOT NULL DEFAULT 'USD'",
+        "note": "TEXT",
+    })
+
     # Ensure columns exist even if DB is older
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(contacts)")
@@ -1105,9 +1232,37 @@ def get_sales_for_contact(conn: sqlite3.Connection, contact_id: int) -> pd.DataF
         params=(int(contact_id),),
     )
 
-def delete_sale_line(conn: sqlite3.Connection, sale_id: int):
-    conn.execute("DELETE FROM sales WHERE id=?", (int(sale_id),))
-    conn.commit()
+def _table_cols(conn: sqlite3.Connection, table: str) -> List[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return [r[1] for r in rows]  # column name is index 1
+
+def get_sales_for_contact(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
+    # If sales table doesn't exist yet, return empty df with expected columns
+    try:
+        cols = _table_cols(conn, "sales")
+    except Exception:
+        return pd.DataFrame(columns=["id","sold_at","product","qty","unit_price_cents","currency","note"])
+
+    wanted = ["id","sold_at","product","qty","unit_price_cents","currency","note"]
+    select_cols = [c for c in wanted if c in cols]
+
+    if not select_cols:
+        return pd.DataFrame(columns=wanted)
+
+    sql = f"""
+        SELECT {", ".join(select_cols)}
+        FROM sales
+        WHERE contact_id=?
+        ORDER BY sold_at DESC, id DESC
+    """
+    df = pd.read_sql_query(sql, conn, params=(int(contact_id),))
+
+    # Ensure missing expected columns exist for downstream UI code
+    for c in wanted:
+        if c not in df.columns:
+            df[c] = "" if c in ("currency","note","product","sold_at") else 0
+    return df[wanted]
+
 
 def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query(
@@ -1789,3 +1944,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
