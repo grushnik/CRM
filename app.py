@@ -100,13 +100,15 @@ def _table_cols(conn: sqlite3.Connection, table: str) -> List[str]:
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, required: Dict[str, str]):
-    cols = set(_table_cols(conn, table))
     cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {r[1] for r in cur.fetchall()}  # column name is index 1
+
     for c, ddl in required.items():
         if c not in cols:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {c} {ddl}")
-    conn.commit()
 
+    conn.commit()
 
 def _backfill_unit_price_cents(conn: sqlite3.Connection):
     cols = set(_table_cols(conn, "sales"))
@@ -2069,5 +2071,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
