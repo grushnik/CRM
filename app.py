@@ -13,8 +13,6 @@ import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 import requests
 
-import matplotlib.pyplot as plt
-
 # -------------------------------------------------------------
 # BASIC CONFIG
 # -------------------------------------------------------------
@@ -2026,7 +2024,6 @@ def revenue_histogram(conn: sqlite3.Connection):
     st.subheader("Total revenue by year")
 
     yearly = get_sales_yearly_totals(conn)
-    # map: year -> revenue_usd (actual)
     actual = {int(r.year): float(r.revenue_usd) for r in yearly.itertuples(index=False)} if not yearly.empty else {}
 
     # requested projections
@@ -2034,39 +2031,34 @@ def revenue_histogram(conn: sqlite3.Connection):
         2026: 200000.0,
     }
 
-    # Build list of years to display:
     years = sorted(set(actual.keys()) | set(projections.keys()) | {2025, 2026})
 
-    values = []
-    labels = []
+    rows = []
     for y in years:
+        is_projected = False
         if y in actual and actual[y] > 0:
-            values.append(actual[y])
-            labels.append(str(y))
+            val = actual[y]
         else:
-            # if no actual, use projection if available, else 0
-            values.append(float(projections.get(y, 0.0)))
-            labels.append(f"{y}*")
+            val = float(projections.get(y, 0.0))
+            is_projected = (y in projections)
 
-    fig = plt.figure()
-    plt.bar(labels, values)
-    plt.ylabel("Revenue (USD)")
-    plt.xlabel("Year")
-    plt.title("Revenue by year (* = projected)")
-    st.pyplot(fig, clear_figure=True)
+        rows.append(
+            {
+                "Year": str(y) + (" (proj)" if is_projected else ""),
+                "Revenue": float(val),
+                "_year_num": int(y),
+            }
+        )
 
-    # Small helper line showing the real DB number for 2025 if exists
+    chart_df = pd.DataFrame(rows).sort_values("_year_num")[["Year", "Revenue"]].reset_index(drop=True)
+
+    # Vertical bars (histogram style)
+    st.bar_chart(chart_df, x="Year", y="Revenue")
+
     if 2025 in actual:
         st.caption(f"2025 actual revenue from DB: **${actual[2025]:,.0f}**")
     else:
         st.caption("2025 has no sales in DB yet (chart shows 0 unless you add sales lines).")
-
-
-def dashboard(conn: sqlite3.Connection):
-    st.subheader("Dashboard")
-    show_dashboard_strip(conn)
-    st.markdown("---")
-    revenue_histogram(conn)
 
 
 # -------------------------------------------------------------
@@ -2136,3 +2128,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
