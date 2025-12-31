@@ -13,12 +13,12 @@ import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 import requests
 
+
 # -------------------------------------------------------------
 # BASIC CONFIG
 # -------------------------------------------------------------
 APP_TITLE = "Radom CRM"
 
-# ✅ Make data paths stable on Streamlit Cloud + local
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_FILE = os.path.join(DATA_DIR, "radom_crm.db")
@@ -46,7 +46,6 @@ APPLICATIONS = sorted(
     ]
 )
 
-# Product “families” you track in CRM
 PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
 
 PIPELINE = [
@@ -64,17 +63,20 @@ PIPELINE = [
 
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
 
+
 # -------------------------------------------------------------
-# ✅ dtype-safe numeric helpers (kills astype(int) crashes)
+# dtype-safe numeric helpers
 # -------------------------------------------------------------
 def safe_int_series(s: pd.Series, default: int = 0) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(default).astype("int64")
 
+
 def safe_float_series(s: pd.Series, default: float = 0.0) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(default).astype("float64")
 
+
 # -------------------------------------------------------------
-# ✅ FIX NOTES IMPORT (sanitize + optionally trim email threads)
+# NOTES SANITIZE
 # -------------------------------------------------------------
 _EMAIL_THREAD_MARKERS = (
     "\nOn ",
@@ -85,10 +87,34 @@ _EMAIL_THREAD_MARKERS = (
     "\nCc:",
 )
 
+
+def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
+    if v is None:
+        return ""
+    s = str(v)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+    if trim_email_threads:
+        for marker in _EMAIL_THREAD_MARKERS:
+            if marker in s:
+                s = s.split(marker)[0]
+                break
+        s = re.split(r"\nOn\s.+\swrote:\s*\n", s, maxsplit=1)[0]
+
+    s = re.sub(r"\n+", " ⏎ ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    if max_len and len(s) > max_len:
+        s = s[:max_len].rstrip() + "…"
+    return s
+
+
+# -------------------------------------------------------------
+# DB CONNECTION + MIGRATIONS
+# -------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
@@ -100,24 +126,24 @@ def _table_cols(conn: sqlite3.Connection, table: str) -> List[str]:
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, required: Dict[str, str]):
+    cols = set(_table_cols(conn, table))
     cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = {r[1] for r in cur.fetchall()}  # column name is index 1
-
     for c, ddl in required.items():
         if c not in cols:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {c} {ddl}")
-
     conn.commit()
+
 
 def _backfill_unit_price_cents(conn: sqlite3.Connection):
     cols = set(_table_cols(conn, "sales"))
     if "unit_price" in cols and "unit_price_cents" in cols:
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE sales
             SET unit_price_cents = COALESCE(unit_price_cents, CAST(ROUND(unit_price * 100.0) AS INTEGER))
             WHERE unit_price_cents IS NULL OR unit_price_cents = 0
-        """)
+            """
+        )
         conn.commit()
 
 
@@ -190,55 +216,43 @@ def init_db(conn: sqlite3.Connection):
         """
     )
 
-    # contacts migration (safe if DB is older)
-    _ensure_columns(conn, "contacts", {
-        "profile_url": "TEXT",
-        "photo": "TEXT",
-        "owner": "TEXT",
-        "last_touch": "TEXT",
-        "website": "TEXT",
-        "gender": "TEXT",
-        "application": "TEXT",
-        "product_interest": "TEXT",
-        "country": "TEXT",
-        "dedupe_key": "TEXT",
-    })
+    _ensure_columns(
+        conn,
+        "contacts",
+        {
+            "profile_url": "TEXT",
+            "photo": "TEXT",
+            "owner": "TEXT",
+            "last_touch": "TEXT",
+            "website": "TEXT",
+            "gender": "TEXT",
+            "application": "TEXT",
+            "product_interest": "TEXT",
+            "country": "TEXT",
+            "dedupe_key": "TEXT",
+        },
+    )
 
-    # sales migration (this is what fixes your crash)
-    _ensure_columns(conn, "sales", {
-        "qty": "INTEGER NOT NULL DEFAULT 1",
-        "unit_price_cents": "INTEGER NOT NULL DEFAULT 0",
-        "currency": "TEXT NOT NULL DEFAULT 'USD'",
-        "note": "TEXT",
-    })
+    _ensure_columns(
+        conn,
+        "sales",
+        {
+            "qty": "INTEGER NOT NULL DEFAULT 1",
+            "unit_price_cents": "INTEGER NOT NULL DEFAULT 0",
+            "currency": "TEXT NOT NULL DEFAULT 'USD'",
+            "note": "TEXT",
+        },
+    )
 
     _backfill_unit_price_cents(conn)
 
-def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
-    if v is None:
-        return ""
-    s = str(v)
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-
-    if trim_email_threads:
-        for marker in _EMAIL_THREAD_MARKERS:
-            if marker in s:
-                s = s.split(marker)[0]
-                break
-        s = re.split(r"\nOn\s.+\swrote:\s*\n", s, maxsplit=1)[0]
-
-    s = re.sub(r"\n+", " ⏎ ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-
-    if max_len and len(s) > max_len:
-        s = s[:max_len].rstrip() + "…"
-    return s
 
 # -------------------------------------------------------------
 # 🎄 CHRISTMAS BACKGROUND (SAFE FOR STREAMLIT CLOUD)
 # -------------------------------------------------------------
 def inject_christmas_background():
     import base64
+
     svg = """
     <svg xmlns="http://www.w3.org/2000/svg" width="260" height="260">
       <rect width="260" height="260" fill="none"/>
@@ -283,6 +297,7 @@ def inject_christmas_background():
         unsafe_allow_html=True,
     )
 
+
 # -------------------------------------------------------------
 # URL + FLAGS HELPERS
 # -------------------------------------------------------------
@@ -296,20 +311,64 @@ def _clean_url(v: Any) -> str:
         return s
     return "https://" + s.lstrip("/")
 
+
 _COUNTRY_TO_ISO2 = {
-    "united states": "US", "usa": "US", "u.s.a.": "US", "us": "US",
-    "canada": "CA", "mexico": "MX", "colombia": "CO", "chile": "CL", "peru": "PE",
-    "brazil": "BR", "argentina": "AR", "united kingdom": "GB", "uk": "GB", "england": "GB",
-    "germany": "DE", "france": "FR", "italy": "IT", "spain": "ES", "netherlands": "NL",
-    "belgium": "BE", "sweden": "SE", "norway": "NO", "denmark": "DK", "finland": "FI",
-    "switzerland": "CH", "austria": "AT", "poland": "PL", "czech republic": "CZ", "czechia": "CZ",
-    "slovakia": "SK", "slovenia": "SI", "croatia": "HR", "bosnia and herzegovina": "BA",
-    "serbia": "RS", "romania": "RO", "bulgaria": "BG", "greece": "GR", "turkey": "TR",
-    "russia": "RU", "ukraine": "UA", "israel": "IL", "saudi arabia": "SA", "uae": "AE",
-    "united arab emirates": "AE", "qatar": "QA", "india": "IN", "china": "CN", "japan": "JP",
-    "south korea": "KR", "korea": "KR", "taiwan": "TW", "singapore": "SG",
-    "australia": "AU", "new zealand": "NZ",
+    "united states": "US",
+    "usa": "US",
+    "u.s.a.": "US",
+    "us": "US",
+    "canada": "CA",
+    "mexico": "MX",
+    "colombia": "CO",
+    "chile": "CL",
+    "peru": "PE",
+    "brazil": "BR",
+    "argentina": "AR",
+    "united kingdom": "GB",
+    "uk": "GB",
+    "england": "GB",
+    "germany": "DE",
+    "france": "FR",
+    "italy": "IT",
+    "spain": "ES",
+    "netherlands": "NL",
+    "belgium": "BE",
+    "sweden": "SE",
+    "norway": "NO",
+    "denmark": "DK",
+    "finland": "FI",
+    "switzerland": "CH",
+    "austria": "AT",
+    "poland": "PL",
+    "czech republic": "CZ",
+    "czechia": "CZ",
+    "slovakia": "SK",
+    "slovenia": "SI",
+    "croatia": "HR",
+    "bosnia and herzegovina": "BA",
+    "serbia": "RS",
+    "romania": "RO",
+    "bulgaria": "BG",
+    "greece": "GR",
+    "turkey": "TR",
+    "russia": "RU",
+    "ukraine": "UA",
+    "israel": "IL",
+    "saudi arabia": "SA",
+    "uae": "AE",
+    "united arab emirates": "AE",
+    "qatar": "QA",
+    "india": "IN",
+    "china": "CN",
+    "japan": "JP",
+    "south korea": "KR",
+    "korea": "KR",
+    "taiwan": "TW",
+    "singapore": "SG",
+    "australia": "AU",
+    "new zealand": "NZ",
 }
+
 
 def flag_img(country: Any, size: int = 18) -> str:
     if country is None:
@@ -329,6 +388,7 @@ def flag_img(country: Any, size: int = 18) -> str:
         f"style='vertical-align:middle;border-radius:2px;margin-left:6px;'/>"
     )
 
+
 # -------------------------------------------------------------
 # DEDUPE KEY
 # -------------------------------------------------------------
@@ -338,6 +398,7 @@ def _norm_text(v: Any) -> str:
     s = str(v).strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
+
 
 def _norm_company(v: Any) -> str:
     s = _norm_text(v)
@@ -349,11 +410,13 @@ def _norm_company(v: Any) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def _norm_email(v: Any) -> str:
     s = _norm_text(v)
     if "@" not in s:
         return ""
     return s
+
 
 def _norm_profile(v: Any) -> str:
     s = _clean_url(v).strip().lower()
@@ -362,6 +425,7 @@ def _norm_profile(v: Any) -> str:
     s = re.sub(r"[?#].*$", "", s)
     s = s.rstrip("/")
     return s
+
 
 def compute_dedupe_key(first: Any, last: Any, company: Any, email: Any, profile_url: Any) -> str:
     em = _norm_email(email)
@@ -377,19 +441,20 @@ def compute_dedupe_key(first: Any, last: Any, company: Any, email: Any, profile_
         return f"nameco:{fn}|{ln}|{co}"
     return ""
 
+
 # -------------------------------------------------------------
-# TELEGRAM OTP (MULTI-USER)
+# TELEGRAM OTP (MULTI-USER) — optional fallback if token missing
 # -------------------------------------------------------------
 def _tg_token() -> str:
-    # ✅ st.secrets may be empty locally; handle gracefully
     try:
         return str(st.secrets.get("TELEGRAM_BOT_TOKEN", "")).strip()
     except Exception:
         return ""
 
+
 def _tg_api(method: str) -> str:
-    token = _tg_token()
-    return f"https://api.telegram.org/bot{token}/{method}"
+    return f"https://api.telegram.org/bot{_tg_token()}/{method}"
+
 
 def telegram_get_me() -> Tuple[int, str]:
     token = _tg_token()
@@ -401,6 +466,7 @@ def telegram_get_me() -> Tuple[int, str]:
     except Exception as e:
         return 0, str(e)
 
+
 def telegram_get_updates() -> Tuple[int, str]:
     token = _tg_token()
     if not token:
@@ -411,218 +477,6 @@ def telegram_get_updates() -> Tuple[int, str]:
     except Exception as e:
         return 0, str(e)
 
-def get_conn() -> sqlite3.Connection:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
-
-def init_db(conn: sqlite3.Connection):
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS contacts (
-          id INTEGER PRIMARY KEY,
-          scan_datetime TEXT,
-          first_name TEXT,
-          last_name TEXT,
-          job_title TEXT,
-          company TEXT,
-          street TEXT,
-          street2 TEXT,
-          zip_code TEXT,
-          city TEXT,
-          state TEXT,
-          country TEXT,
-          phone TEXT,
-          email TEXT,
-          website TEXT,
-          category TEXT,
-          status TEXT DEFAULT 'New',
-          owner TEXT,
-          last_touch TEXT,
-          gender TEXT,
-          application TEXT,
-          product_interest TEXT,
-          photo TEXT,
-          profile_url TEXT,
-          dedupe_key TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS notes (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER,
-          ts TEXT,
-          body TEXT,
-          next_followup TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS status_history (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER,
-          ts TEXT,
-          old_status TEXT,
-          new_status TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS telegram_users (
-          username TEXT PRIMARY KEY,
-          chat_id INTEGER,
-          first_seen TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS sales (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER NOT NULL,
-          sold_at TEXT NOT NULL,
-          product TEXT NOT NULL,
-          qty INTEGER NOT NULL DEFAULT 1,
-          unit_price_cents INTEGER NOT NULL,
-          currency TEXT NOT NULL DEFAULT 'USD',
-          note TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-        """
-    )
-
-    def _ensure_columns(conn: sqlite3.Connection, table: str, required: Dict[str, str]):
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = [r[1] for r in cur.fetchall()]
-    for c, ddl in required.items():
-        if c not in cols:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {c} {ddl}")
-    conn.commit()
-
-def init_db(conn: sqlite3.Connection):
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS contacts (
-          id INTEGER PRIMARY KEY,
-          scan_datetime TEXT,
-          first_name TEXT,
-          last_name TEXT,
-          job_title TEXT,
-          company TEXT,
-          street TEXT,
-          street2 TEXT,
-          zip_code TEXT,
-          city TEXT,
-          state TEXT,
-          country TEXT,
-          phone TEXT,
-          email TEXT,
-          website TEXT,
-          category TEXT,
-          status TEXT DEFAULT 'New',
-          owner TEXT,
-          last_touch TEXT,
-          gender TEXT,
-          application TEXT,
-          product_interest TEXT,
-          photo TEXT,
-          profile_url TEXT,
-          dedupe_key TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS notes (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER,
-          ts TEXT,
-          body TEXT,
-          next_followup TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS status_history (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER,
-          ts TEXT,
-          old_status TEXT,
-          new_status TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS telegram_users (
-          username TEXT PRIMARY KEY,
-          chat_id INTEGER,
-          first_seen TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS sales (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER NOT NULL,
-          sold_at TEXT NOT NULL,
-          product TEXT NOT NULL,
-          qty INTEGER NOT NULL DEFAULT 1,
-          unit_price_cents INTEGER NOT NULL,
-          currency TEXT NOT NULL DEFAULT 'USD',
-          note TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-        """
-    )
-
-    def _backfill_unit_price_cents(conn: sqlite3.Connection):
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(sales)").fetchall()]
-    if "unit_price" in cols and "unit_price_cents" in cols:
-        conn.execute("""
-            UPDATE sales
-            SET unit_price_cents = COALESCE(unit_price_cents, CAST(ROUND(unit_price * 100.0) AS INTEGER))
-            WHERE unit_price_cents IS NULL OR unit_price_cents = 0
-        """)
-        conn.commit()
-
-    # Existing contacts migration (yours)
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(contacts)")
-    cols = [row[1] for row in cur.fetchall()]
-    add_cols = {
-        "profile_url": "TEXT",
-        "photo": "TEXT",
-        "owner": "TEXT",
-        "last_touch": "TEXT",
-        "website": "TEXT",
-        "gender": "TEXT",
-        "application": "TEXT",
-        "product_interest": "TEXT",
-        "country": "TEXT",
-        "dedupe_key": "TEXT",
-    }
-    for c, t in add_cols.items():
-        if c not in cols:
-            cur.execute(f"ALTER TABLE contacts ADD COLUMN {c} {t}")
-    conn.commit()
-
-    # ✅ NEW: sales table migration (fixes your crash)
-    _ensure_columns(conn, "sales", {
-        "qty": "INTEGER NOT NULL DEFAULT 1",
-        "unit_price_cents": "INTEGER NOT NULL DEFAULT 0",
-        "currency": "TEXT NOT NULL DEFAULT 'USD'",
-        "note": "TEXT",
-    })
-
-    # Ensure columns exist even if DB is older
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(contacts)")
-    cols = [row[1] for row in cur.fetchall()]
-    add_cols = {
-        "profile_url": "TEXT",
-        "photo": "TEXT",
-        "owner": "TEXT",
-        "last_touch": "TEXT",
-        "website": "TEXT",
-        "gender": "TEXT",
-        "application": "TEXT",
-        "product_interest": "TEXT",
-        "country": "TEXT",
-        "dedupe_key": "TEXT",
-    }
-    for c, t in add_cols.items():
-        if c not in cols:
-            cur.execute(f"ALTER TABLE contacts ADD COLUMN {c} {t}")
-    conn.commit()
 
 def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     username = (username or "").strip().lstrip("@")
@@ -636,6 +490,7 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     if username.lower() in cache:
         return cache[username.lower()]
 
+    # Try DB
     try:
         conn = get_conn()
         init_db(conn)
@@ -649,6 +504,7 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     except Exception:
         pass
 
+    # Scan getUpdates
     try:
         resp = requests.get(_tg_api("getUpdates"), params={"limit": 100}, timeout=15)
         if resp.status_code != 200:
@@ -666,9 +522,11 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
             frm = msg.get("from") or {}
             u1 = (frm.get("username") or "").strip().lstrip("@")
             u2 = (chat.get("username") or "").strip().lstrip("@")
+
             if u1.lower() == username.lower() or u2.lower() == username.lower():
                 if chat.get("type") == "private" and chat.get("id") is not None:
                     best = int(chat["id"])
+
         if best is not None:
             cache[username.lower()] = best
             try:
@@ -684,7 +542,9 @@ def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
             return best
     except Exception:
         return None
+
     return None
+
 
 def telegram_send_message(chat_id: int, text: str) -> Tuple[bool, str]:
     token = _tg_token()
@@ -702,14 +562,17 @@ def telegram_send_message(chat_id: int, text: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
+
 def check_login_two_factor_telegram():
+    # If token missing, do password-only login so app still runs locally
+    tg_token = _tg_token()
+
     try:
         expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
     except Exception:
         expected = DEFAULT_PASSWORD
 
     ss = st.session_state
-    ss.setdefault("auth_pw_ok", False)
     ss.setdefault("authed", False)
 
     if ss["authed"]:
@@ -717,8 +580,22 @@ def check_login_two_factor_telegram():
 
     st.sidebar.header("🔐 Login")
 
-    tg_user = st.sidebar.text_input("Telegram username (without @)", key="login_tg_user").strip().lstrip("@")
     pwd = st.sidebar.text_input("Password", type="password", key="login_pwd")
+
+    if not tg_token:
+        st.sidebar.warning("TELEGRAM_BOT_TOKEN not set → using password-only login.")
+        if st.sidebar.button("Login"):
+            if pwd != expected:
+                st.sidebar.error("Wrong password")
+                st.stop()
+            ss["authed"] = True
+            st.rerun()
+        st.stop()
+
+    # Telegram 2FA flow
+    ss.setdefault("auth_pw_ok", False)
+
+    tg_user = st.sidebar.text_input("Telegram username (without @)", key="login_tg_user").strip().lstrip("@")
 
     if not ss["auth_pw_ok"]:
         if st.sidebar.button("Continue"):
@@ -776,6 +653,7 @@ def check_login_two_factor_telegram():
             else:
                 st.sidebar.error("Incorrect code")
                 st.stop()
+
     with colv2:
         if st.sidebar.button("Start over"):
             for k in ("auth_pw_ok", "otp_code", "otp_time", "otp_delivery_ok", "otp_delivery_msg", "login_username"):
@@ -798,18 +676,8 @@ def check_login_two_factor_telegram():
             st.write(f"Status: {status}")
             st.code(txt)
 
-        try:
-            admin_chat_id = st.secrets.get("ADMIN_CHAT_ID", "")
-        except Exception:
-            admin_chat_id = ""
-        if admin_chat_id:
-            if st.button("Send test message to admin_chat_id"):
-                ok, msg = telegram_send_message(int(admin_chat_id), "✅ Telegram test from Radom CRM (admin_chat_id)")
-                st.write("Test message sent." if ok else "Failed to send.")
-                st.code(msg)
-        else:
-            st.caption("Tip: set ADMIN_CHAT_ID in secrets to enable test-send button.")
     st.stop()
+
 
 # -------------------------------------------------------------
 # BACKUP / RESTORE
@@ -819,6 +687,7 @@ def backup_contacts(conn: sqlite3.Connection):
     if not df.empty:
         os.makedirs(DATA_DIR, exist_ok=True)
         df.to_csv(BACKUP_FILE, index=False)
+
 
 def restore_from_backup_if_empty(conn: sqlite3.Connection):
     cur = conn.cursor()
@@ -832,8 +701,9 @@ def restore_from_backup_if_empty(conn: sqlite3.Connection):
         except Exception as e:
             print(f"Backup restore failed: {e}")
 
+
 # -------------------------------------------------------------
-# DEDUPE
+# DEDUPE INDEX + DEDUPE
 # -------------------------------------------------------------
 def ensure_dedupe_index(conn: sqlite3.Connection):
     cur = conn.cursor()
@@ -848,6 +718,7 @@ def ensure_dedupe_index(conn: sqlite3.Connection):
         conn.commit()
     except Exception:
         pass
+
 
 def dedupe_database(conn: sqlite3.Connection) -> int:
     cur = conn.cursor()
@@ -877,9 +748,7 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
 
     deleted = 0
     for (k,) in dup_keys:
-        ids = [r[0] for r in cur.execute(
-            "SELECT id FROM contacts WHERE dedupe_key=? ORDER BY id ASC", (k,)
-        ).fetchall()]
+        ids = [r[0] for r in cur.execute("SELECT id FROM contacts WHERE dedupe_key=? ORDER BY id ASC", (k,)).fetchall()]
         if len(ids) <= 1:
             continue
 
@@ -898,6 +767,7 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
     ensure_dedupe_index(conn)
     backup_contacts(conn)
     return deleted
+
 
 # -------------------------------------------------------------
 # IMPORT / NORMALIZATION
@@ -952,14 +822,35 @@ COLMAP = {
 }
 
 EXPECTED = [
-    "scan_datetime","first_name","last_name","job_title","company","street","street2","zip_code",
-    "city","state","country","phone","email","website","notes","gender","application",
-    "product_interest","status","owner","last_touch","photo","profile_url",
+    "scan_datetime",
+    "first_name",
+    "last_name",
+    "job_title",
+    "company",
+    "street",
+    "street2",
+    "zip_code",
+    "city",
+    "state",
+    "country",
+    "phone",
+    "email",
+    "website",
+    "notes",
+    "gender",
+    "application",
+    "product_interest",
+    "status",
+    "owner",
+    "last_touch",
+    "photo",
+    "profile_url",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
 PROF_PAT = re.compile(r"\b(assistant|associate|full)?\s*professor\b|department chair", re.I)
 IND_PAT = re.compile(r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b", re.I)
+
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     new_cols = {c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower()) for c in df.columns}
@@ -968,6 +859,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = None
     return df
+
 
 def infer_category(row: pd.Series) -> str:
     title = (row.get("job_title") or "")
@@ -983,6 +875,7 @@ def infer_category(row: pd.Series) -> str:
         return "Industry"
     return "Other"
 
+
 def parse_dt(v) -> Optional[str]:
     if v is None or str(v).strip() == "" or pd.isna(v):
         return None
@@ -990,6 +883,7 @@ def parse_dt(v) -> Optional[str]:
         return dtparser.parse(str(v)).isoformat()
     except Exception:
         return str(v)
+
 
 def normalize_status(val: Any) -> Optional[str]:
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -1014,6 +908,7 @@ def normalize_status(val: Any) -> Optional[str]:
         return synonyms[s]
     return None
 
+
 def normalize_application(val: Any) -> Optional[str]:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
@@ -1023,21 +918,36 @@ def normalize_application(val: Any) -> Optional[str]:
     for app in APPLICATIONS:
         if s == app.lower():
             return app
-    if "pfas" in s: return "PFAS destruction"
-    if "co2" in s or "carbon dioxide" in s: return "CO2 conversion"
-    if "waste" in s or "gasification" in s or "rdf" in s: return "Waste-to-Energy"
-    if "nox" in s or "nitric" in s or "nitrate" in s: return "NOx production"
-    if "nitrification" in s: return "Nitrification"
-    if "hydrogen" in s or "h2" in s: return "Hydrogen production"
-    if "carbon black" in s or "soot" in s: return "Carbon black production"
-    if "mining" in s or "tailings" in s: return "Mining waste"
-    if "reentry" in s or "re-entry" in s: return "Reentry"
-    if "propulsion" in s or "rocket" in s or "thruster" in s: return "Propulsion"
-    if "methane" in s or "reforming" in s or "steam reforming" in s: return "Methane reforming"
-    if "communication" in s: return "Communication"
-    if "ultrasonic" in s or "ultrasound" in s: return "Ultrasonic"
-    if "surface" in s and ("treat" in s or "coating" in s or "modify" in s): return "Surface treatment"
+    if "pfas" in s:
+        return "PFAS destruction"
+    if "co2" in s or "carbon dioxide" in s:
+        return "CO2 conversion"
+    if "waste" in s or "gasification" in s or "rdf" in s:
+        return "Waste-to-Energy"
+    if "nox" in s or "nitric" in s or "nitrate" in s:
+        return "NOx production"
+    if "nitrification" in s:
+        return "Nitrification"
+    if "hydrogen" in s or "h2" in s:
+        return "Hydrogen production"
+    if "carbon black" in s or "soot" in s:
+        return "Carbon black production"
+    if "mining" in s or "tailings" in s:
+        return "Mining waste"
+    if "reentry" in s or "re-entry" in s:
+        return "Reentry"
+    if "propulsion" in s or "rocket" in s or "thruster" in s:
+        return "Propulsion"
+    if "methane" in s or "reforming" in s or "steam reforming" in s:
+        return "Methane reforming"
+    if "communication" in s:
+        return "Communication"
+    if "ultrasonic" in s or "ultrasound" in s:
+        return "Ultrasonic"
+    if "surface" in s and ("treat" in s or "coating" in s or "modify" in s):
+        return "Surface treatment"
     return None
+
 
 def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     cols_lower = [str(c).strip().lower() for c in df.columns]
@@ -1045,11 +955,13 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
         return df
     if df.empty:
         return df
+
     first_row = df.iloc[0]
     first_vals = ["" if (isinstance(v, float) and pd.isna(v)) else str(v).strip() for v in first_row]
     first_vals_lower = [v.lower() for v in first_vals]
     known = set(COLMAP.keys()) | set(EXPECTED)
     score = sum(1 for v in first_vals_lower if v in known)
+
     if score >= 3:
         new_cols = []
         for i, val in enumerate(first_vals_lower):
@@ -1061,12 +973,14 @@ def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
                 df = df.drop(columns=[c])
     return df
 
+
 def load_contacts_file(uploaded_file) -> pd.DataFrame:
     if uploaded_file.name.lower().endswith(".csv"):
         df = pd.read_csv(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
     return _fix_header_row_if_needed(df)
+
 
 # -------------------------------------------------------------
 # UPSERT (NO DUPLICATES)
@@ -1085,6 +999,7 @@ def _find_existing_contact_id(cur: sqlite3.Cursor, dedupe_key: str, email: Optio
         if row:
             return int(row[0])
     return None
+
 
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     df = normalize_columns(df).fillna("")
@@ -1216,6 +1131,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     ensure_dedupe_index(conn)
     return n
 
+
 # -------------------------------------------------------------
 # QUERIES & NOTES
 # -------------------------------------------------------------
@@ -1263,12 +1179,14 @@ def query_contacts(
 
     return pd.read_sql_query(sql, conn, params=params)
 
+
 def get_notes(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
     return pd.read_sql_query(
         "SELECT ts, body, next_followup FROM notes WHERE contact_id=? ORDER BY ts DESC",
         conn,
         params=(contact_id,),
     )
+
 
 def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query("SELECT contact_id, ts, body FROM notes ORDER BY contact_id, ts", conn)
@@ -1281,11 +1199,11 @@ def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
     )
     return grouped
 
+
 def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status: str):
     new_status = (new_status or "New").strip()
     cur = conn.cursor()
-    cur.execute("SELECT status FROM contacts WHERE id=?", (contact_id,))
-    row = cur.fetchone()
+    row = cur.execute("SELECT status FROM contacts WHERE id=?", (contact_id,)).fetchone()
     if not row:
         return
     old_status = (row[0] or "New").strip()
@@ -1300,6 +1218,7 @@ def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status:
     cur.execute("UPDATE contacts SET status=?, last_touch=? WHERE id=?", (new_status, ts_iso, contact_id))
     conn.commit()
     backup_contacts(conn)
+
 
 # -------------------------------------------------------------
 # SALES HELPERS
@@ -1316,6 +1235,7 @@ def _usd_to_cents(x: Any) -> Optional[int]:
     except Exception:
         return None
 
+
 def add_sale_line(
     conn: sqlite3.Connection,
     contact_id: int,
@@ -1327,10 +1247,13 @@ def add_sale_line(
 ):
     qty = int(qty) if qty is not None else 1
     qty = max(qty, 1)
+
     cents = _usd_to_cents(unit_price_usd)
     if cents is None:
         raise ValueError("Invalid price")
+
     sold_at_iso = sold_at.isoformat() if isinstance(sold_at, date) else datetime.utcnow().date().isoformat()
+
     conn.execute(
         """
         INSERT INTO sales(contact_id, sold_at, product, qty, unit_price_cents, currency, note)
@@ -1340,32 +1263,21 @@ def add_sale_line(
     )
     conn.commit()
 
-def get_sales_for_contact(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
-    return pd.read_sql_query(
-        """
-        SELECT id, sold_at, product, qty, unit_price_cents, currency, note
-        FROM sales
-        WHERE contact_id=?
-        ORDER BY sold_at DESC, id DESC
-        """,
-        conn,
-        params=(int(contact_id),),
-    )
 
-def _table_cols(conn: sqlite3.Connection, table: str) -> List[str]:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return [r[1] for r in rows]  # column name is index 1
+def delete_sale_line(conn: sqlite3.Connection, sale_id: int):
+    conn.execute("DELETE FROM sales WHERE id=?", (int(sale_id),))
+    conn.commit()
+
 
 def get_sales_for_contact(conn: sqlite3.Connection, contact_id: int) -> pd.DataFrame:
     # If sales table doesn't exist yet, return empty df with expected columns
     try:
         cols = _table_cols(conn, "sales")
     except Exception:
-        return pd.DataFrame(columns=["id","sold_at","product","qty","unit_price_cents","currency","note"])
+        return pd.DataFrame(columns=["id", "sold_at", "product", "qty", "unit_price_cents", "currency", "note"])
 
-    wanted = ["id","sold_at","product","qty","unit_price_cents","currency","note"]
+    wanted = ["id", "sold_at", "product", "qty", "unit_price_cents", "currency", "note"]
     select_cols = [c for c in wanted if c in cols]
-
     if not select_cols:
         return pd.DataFrame(columns=wanted)
 
@@ -1377,27 +1289,31 @@ def get_sales_for_contact(conn: sqlite3.Connection, contact_id: int) -> pd.DataF
     """
     df = pd.read_sql_query(sql, conn, params=(int(contact_id),))
 
-    # Ensure missing expected columns exist for downstream UI code
     for c in wanted:
         if c not in df.columns:
-            df[c] = "" if c in ("currency","note","product","sold_at") else 0
+            df[c] = "" if c in ("currency", "note", "product", "sold_at") else 0
     return df[wanted]
 
 
 def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
-    df = pd.read_sql_query(
-        """
-        SELECT
-          s.contact_id,
-          COALESCE(SUM(s.qty),0) AS sold_qty,
-          COALESCE(SUM(s.qty * s.unit_price_cents),0) AS sold_revenue_cents,
-          MIN(s.sold_at) AS first_sold_at,
-          MAX(s.sold_at) AS last_sold_at
-        FROM sales s
-        GROUP BY s.contact_id
-        """,
-        conn,
-    )
+    # If sales doesn't exist or is empty → safe empty output
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+              s.contact_id,
+              COALESCE(SUM(s.qty),0) AS sold_qty,
+              COALESCE(SUM(s.qty * s.unit_price_cents),0) AS sold_revenue_cents,
+              MIN(s.sold_at) AS first_sold_at,
+              MAX(s.sold_at) AS last_sold_at
+            FROM sales s
+            GROUP BY s.contact_id
+            """,
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame()
+
     if df.empty:
         return pd.DataFrame(
             {
@@ -1444,25 +1360,31 @@ def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
     df["sold_revenue_usd"] = safe_float_series(df["sold_revenue_cents"], 0.0) / 100.0
     return df
 
+
 def get_sales_yearly_totals(conn: sqlite3.Connection) -> pd.DataFrame:
-    df = pd.read_sql_query(
-        """
-        SELECT
-          CAST(strftime('%Y', sold_at) AS INTEGER) AS year,
-          COALESCE(SUM(qty),0) AS qty,
-          COALESCE(SUM(qty * unit_price_cents),0) AS revenue_cents
-        FROM sales
-        GROUP BY CAST(strftime('%Y', sold_at) AS INTEGER)
-        ORDER BY year ASC
-        """,
-        conn,
-    )
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT
+              CAST(strftime('%Y', sold_at) AS INTEGER) AS year,
+              COALESCE(SUM(qty),0) AS qty,
+              COALESCE(SUM(qty * unit_price_cents),0) AS revenue_cents
+            FROM sales
+            GROUP BY CAST(strftime('%Y', sold_at) AS INTEGER)
+            ORDER BY year ASC
+            """,
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame()
+
     if df.empty:
         return pd.DataFrame(columns=["year", "qty", "revenue_usd"])
     df["qty"] = safe_int_series(df["qty"], 0)
     df["revenue_cents"] = safe_int_series(df["revenue_cents"], 0)
     df["revenue_usd"] = df["revenue_cents"] / 100.0
     return df[["year", "qty", "revenue_usd"]]
+
 
 # -------------------------------------------------------------
 # CRM STATS: conversion + speed
@@ -1478,11 +1400,16 @@ def _try_parse_iso(ts: Any) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def get_conversion_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
-    df_hist = pd.read_sql_query(
-        "SELECT contact_id, ts, new_status FROM status_history ORDER BY contact_id, ts",
-        conn,
-    )
+    try:
+        df_hist = pd.read_sql_query(
+            "SELECT contact_id, ts, new_status FROM status_history ORDER BY contact_id, ts",
+            conn,
+        )
+    except Exception:
+        df_hist = pd.DataFrame(columns=["contact_id", "ts", "new_status"])
+
     df_contacts = pd.read_sql_query("SELECT id, status FROM contacts", conn)
 
     first_contacted: Dict[int, datetime] = {}
@@ -1499,10 +1426,14 @@ def get_conversion_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         if ns == "Won" and cid not in first_won_status:
             first_won_status[cid] = ts
 
-    df_sales_min = pd.read_sql_query(
-        "SELECT contact_id, MIN(sold_at) AS first_sold_at FROM sales GROUP BY contact_id",
-        conn,
-    )
+    try:
+        df_sales_min = pd.read_sql_query(
+            "SELECT contact_id, MIN(sold_at) AS first_sold_at FROM sales GROUP BY contact_id",
+            conn,
+        )
+    except Exception:
+        df_sales_min = pd.DataFrame(columns=["contact_id", "first_sold_at"])
+
     first_sold: Dict[int, datetime] = {}
     for r in df_sales_min.itertuples(index=False):
         cid = int(r.contact_id)
@@ -1540,12 +1471,16 @@ def get_conversion_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         "speed_n": len(deltas),
     }
 
+
 # -------------------------------------------------------------
 # TOP COUNTERS (torches + revenue)
 # -------------------------------------------------------------
 def show_sales_counters(conn: sqlite3.Connection):
-    df_qty = pd.read_sql_query("SELECT COALESCE(SUM(qty),0) AS q FROM sales", conn)
-    total_qty = int(pd.to_numeric(df_qty.iloc[0]["q"], errors="coerce") or 0) if not df_qty.empty else 0
+    try:
+        df_qty = pd.read_sql_query("SELECT COALESCE(SUM(qty),0) AS q FROM sales", conn)
+        total_qty = int(pd.to_numeric(df_qty.iloc[0]["q"], errors="coerce") or 0) if not df_qty.empty else 0
+    except Exception:
+        total_qty = 0
 
     yearly = get_sales_yearly_totals(conn)
     year_map = {int(r.year): float(r.revenue_usd) for r in yearly.itertuples(index=False)} if not yearly.empty else {}
@@ -1554,17 +1489,20 @@ def show_sales_counters(conn: sqlite3.Connection):
     start_year = 2025
     years = list(range(start_year, current_year + 1))
 
-    df_companies = pd.read_sql_query(
-        """
-        SELECT DISTINCT TRIM(c.company) AS company
-        FROM sales s
-        JOIN contacts c ON c.id = s.contact_id
-        WHERE c.company IS NOT NULL AND TRIM(c.company) <> ''
-        ORDER BY company
-        """,
-        conn,
-    )
-    companies = df_companies["company"].dropna().tolist() if not df_companies.empty else []
+    try:
+        df_companies = pd.read_sql_query(
+            """
+            SELECT DISTINCT TRIM(c.company) AS company
+            FROM sales s
+            JOIN contacts c ON c.id = s.contact_id
+            WHERE c.company IS NOT NULL AND TRIM(c.company) <> ''
+            ORDER BY company
+            """,
+            conn,
+        )
+        companies = df_companies["company"].dropna().tolist() if not df_companies.empty else []
+    except Exception:
+        companies = []
 
     lines = []
     for y in years[-3:]:
@@ -1594,6 +1532,7 @@ def show_sales_counters(conn: sqlite3.Connection):
     )
     st.caption("Sold to: " + " • ".join(companies) if companies else "Sold to: no customers yet")
 
+
 # -------------------------------------------------------------
 # PRIORITY LISTS (HTML)
 # -------------------------------------------------------------
@@ -1619,10 +1558,14 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
         application = (sub.get("application") or "").strip()
 
         meta_bits = []
-        if company: meta_bits.append(company)
-        if email: meta_bits.append(email)
-        if product: meta_bits.append(f"interested in {product}")
-        if application: meta_bits.append(f"application: {application}")
+        if company:
+            meta_bits.append(company)
+        if email:
+            meta_bits.append(email)
+        if product:
+            meta_bits.append(f"interested in {product}")
+        if application:
+            meta_bits.append(f"application: {application}")
         meta = " • ".join(meta_bits) if meta_bits else "—"
 
         if profile:
@@ -1632,10 +1575,12 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
 
         status_badge = (
             f"<span style='padding:2px 8px;border-radius:999px;background:rgba(255,255,255,0.10);font-size:12px;'>{status}</span>"
-            if status else ""
+            if status
+            else ""
         )
 
-        rows_html.append(f"""
+        rows_html.append(
+            f"""
         <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.08);">
           <div style="flex:0 0 auto;margin-top:2px;">{profile_icon_html}</div>
           <div style="flex:1 1 auto;min-width:0;">
@@ -1648,11 +1593,13 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
             <div style="font-size:12px;opacity:0.75;margin-top:2px;line-height:1.2;">{meta}</div>
           </div>
         </div>
-        """)
+        """
+        )
 
     block = f"<div style='font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial;'>{''.join(rows_html)}</div>"
     est_height = min(1200, 54 * len(df) + 60)
     components.html(block, height=est_height, scrolling=True)
+
 
 def show_priority_lists(conn: sqlite3.Connection):
     st.subheader("Customer overview")
@@ -1700,6 +1647,7 @@ def show_priority_lists(conn: sqlite3.Connection):
         """
         _render_lead_list(cold_header, cold_raw)
 
+
 # -------------------------------------------------------------
 # SIDEBAR IMPORT / EXPORT + DEDUPE BUTTON
 # -------------------------------------------------------------
@@ -1726,6 +1674,7 @@ def sidebar_import_export(conn: sqlite3.Connection):
         csv_bytes = export_df.to_csv(index=False, quoting=csv.QUOTE_ALL).encode("utf-8")
         st.sidebar.download_button("Download Contacts CSV (filtered)", csv_bytes, file_name="radom-contacts.csv")
 
+
 # -------------------------------------------------------------
 # FILTERS UI
 # -------------------------------------------------------------
@@ -1748,6 +1697,7 @@ def filters_ui():
         prod_filter = st.multiselect("Product type interest", PRODUCTS, [])
 
     return q, cats, stats, st_like, app_filter, prod_filter
+
 
 # -------------------------------------------------------------
 # CONTACT EDITOR + NOTES + SALES
@@ -1775,7 +1725,12 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     with c3:
         website = st.text_input("Website", value=str(row.get("website") or ""), key=f"wb_{contact_id}")
         profile_url = st.text_input("LinkedIn/Profile URL", value=str(row.get("profile_url") or ""), key=f"li_{contact_id}")
-        owner = st.selectbox("Owner", OWNERS, index=OWNERS.index(row.get("owner") or "") if (row.get("owner") or "") in OWNERS else 0, key=f"ow_{contact_id}")
+        owner = st.selectbox(
+            "Owner",
+            OWNERS,
+            index=OWNERS.index(row.get("owner") or "") if (row.get("owner") or "") in OWNERS else 0,
+            key=f"ow_{contact_id}",
+        )
 
     c4, c5, c6 = st.columns(3)
     with c4:
@@ -1945,6 +1900,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.warning("Sale line deleted.")
             st.rerun()
 
+
 # -------------------------------------------------------------
 # DASHBOARD
 # -------------------------------------------------------------
@@ -1963,9 +1919,12 @@ def dashboard(conn: sqlite3.Connection):
         st.metric("Contacted → Won", f"{stats['conversion_rate']*100:.1f}%")
 
     if stats["avg_days_contacted_to_win"] is not None:
-        st.caption(f"Avg speed (first Contacted → first Win/Sale): **{stats['avg_days_contacted_to_win']:.1f} days** (n={stats['speed_n']})")
+        st.caption(
+            f"Avg speed (first Contacted → first Win/Sale): **{stats['avg_days_contacted_to_win']:.1f} days** (n={stats['speed_n']})"
+        )
     else:
         st.caption("Speed metric: not enough status-history data yet (needs Contacted timestamps).")
+
 
 # -------------------------------------------------------------
 # EXPORT BUILD (includes notes + sales)
@@ -1997,19 +1956,13 @@ def build_export_df(conn: sqlite3.Connection, base_df: pd.DataFrame) -> pd.DataF
         out["last_sold_at"] = ""
         out["sales_lines"] = ""
 
-    out["sold_qty"] = safe_int_series(out.get("sold_qty", pd.Series([0]*len(out))), 0)
-    out["sold_revenue_cents"] = safe_int_series(out.get("sold_revenue_cents", pd.Series([0]*len(out))), 0)
-    out["sold_revenue_usd"] = safe_float_series(out.get("sold_revenue_usd", pd.Series([0.0]*len(out))), 0.0)
+    out["sold_qty"] = safe_int_series(out.get("sold_qty", pd.Series([0] * len(out))), 0)
+    out["sold_revenue_cents"] = safe_int_series(out.get("sold_revenue_cents", pd.Series([0] * len(out))), 0)
+    out["sold_revenue_usd"] = safe_float_series(out.get("sold_revenue_usd", pd.Series([0.0] * len(out))), 0.0)
 
     out = out.fillna("")
     return out
 
-    st.write("DB file:", DB_FILE)
-    try:
-        conn = get_conn()
-        st.write("Sales cols:", _table_cols(conn, "sales"))
-    except Exception as e:
-        st.error(f"DB debug failed: {e}")
 
 # -------------------------------------------------------------
 # MAIN
@@ -2069,8 +2022,6 @@ def main():
         row = df[df["id"] == picked].iloc[0]
         contact_editor(conn, row)
 
+
 if __name__ == "__main__":
     main()
-
-
-
