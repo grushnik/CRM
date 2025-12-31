@@ -62,7 +62,6 @@ PIPELINE = [
 
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
 
-
 # -------------------------------------------------------------
 # dtype-safe numeric helpers
 # -------------------------------------------------------------
@@ -575,6 +574,7 @@ def check_login_two_factor_telegram():
 
     st.sidebar.header("🔐 Login")
 
+    # username FIRST, then password
     tg_user = st.sidebar.text_input("Telegram username (without @)", key="login_tg_user").strip().lstrip("@")
     pwd = st.sidebar.text_input("Password", type="password", key="login_pwd")
 
@@ -621,7 +621,7 @@ def check_login_two_factor_telegram():
         st.stop()
 
     st.sidebar.caption("Enter the 6-digit code sent to your Telegram private chat with the bot.")
-    code_in = st.sidebar.text_input("Enter 6-digit code", max_chars=6, key="otp_in")
+    code_in = st.sidebar.text_input("Enter 6-digit code", max_chars=6)
 
     colv1, colv2 = st.sidebar.columns(2)
     with colv1:
@@ -800,6 +800,14 @@ COLMAP = {
     "profile url": "profile_url",
     "profile link": "profile_url",
     "profile_url": "profile_url",
+
+    # If you import from an exported CSV that includes sales aggregates
+    "sold_qty": "sold_qty",
+    "sold_revenue_cents": "sold_revenue_cents",
+    "sold_revenue_usd": "sold_revenue_usd",
+    "sales_lines": "sales_lines",
+    "first_sold_at": "first_sold_at",
+    "last_sold_at": "last_sold_at",
 }
 
 EXPECTED = [
@@ -985,6 +993,138 @@ def _find_existing_contact_id(
     return None
 
 
+def _usd_to_cents(x: Any) -> Optional[int]:
+    if x is None:
+        return None
+    s = str(x).strip().replace(",", "")
+    if s == "":
+        return None
+    try:
+        val = float(s)
+        return int(round(val * 100))
+    except Exception:
+        return None
+
+
+def _parse_sold_at_to_iso(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() == "nan":
+        return None
+    try:
+        dt = dtparser.parse(s)
+        return dt.date().isoformat()
+    except Exception:
+        return None
+
+
+_SALES_LINE_RE = re.compile(
+    r"^\s*(\d{4}-\d{2}-\d{2})\s*:\s*(.*?)\s*x(\d+)\s*@\s*\$([\d,]+(?:\.\d+)?)\s*$"
+)
+
+
+def _extract_sales_rows_from_import(r: pd.Series) -> List[Dict[str, Any]]:
+    """
+    Supports import from your exported CSV where 'sales_lines' looks like:
+      2025-12-31: 1 kW x1 @ $35,000 | 2026-01-02: 10 kW x2 @ $40,000
+    Fallback: if sold_qty + sold_revenue are present, creates 1 synthetic sales line.
+    """
+    rows: List[Dict[str, Any]] = []
+
+    sales_lines = str(r.get("sales_lines") or "").strip()
+    if sales_lines and sales_lines.lower() != "nan":
+        parts = [p.strip() for p in sales_lines.split("|") if p.strip()]
+        for p in parts:
+            m = _SALES_LINE_RE.match(p)
+            if not m:
+                continue
+            sold_at = m.group(1)
+            product = (m.group(2) or "").strip() or "1 kW"
+            qty = int(m.group(3))
+            unit_price_usd = float(str(m.group(4)).replace(",", ""))
+            rows.append(
+                {
+                    "sold_at": sold_at,
+                    "product": product,
+                    "qty": max(1, int(qty)),
+                    "unit_price_cents": int(round(unit_price_usd * 100)),
+                    "note": "Imported from CSV (sales_lines)",
+                }
+            )
+
+    if rows:
+        return rows
+
+    # Fallback: build one synthetic line from sold_qty / sold_revenue
+    try:
+        sold_qty = int(pd.to_numeric(r.get("sold_qty"), errors="coerce") or 0)
+    except Exception:
+        sold_qty = 0
+
+    sold_rev_cents = pd.to_numeric(r.get("sold_revenue_cents"), errors="coerce")
+    sold_rev_usd = pd.to_numeric(r.get("sold_revenue_usd"), errors="coerce")
+
+    rev_cents = 0
+    if sold_rev_cents is not None and not pd.isna(sold_rev_cents):
+        rev_cents = int(sold_rev_cents)
+    elif sold_rev_usd is not None and not pd.isna(sold_rev_usd):
+        rev_cents = int(round(float(sold_rev_usd) * 100))
+
+    if sold_qty > 0 and rev_cents > 0:
+        sold_at = _parse_sold_at_to_iso(r.get("first_sold_at")) or _parse_sold_at_to_iso(r.get("last_sold_at")) or None
+        if not sold_at:
+            sold_at = datetime.utcnow().date().isoformat()
+
+        # best-guess product if not specified
+        product = (str(r.get("product_interest") or "").strip() or "1 kW")
+        unit_price_cents = int(round(rev_cents / max(1, sold_qty)))
+
+        rows.append(
+            {
+                "sold_at": sold_at,
+                "product": product,
+                "qty": max(1, int(sold_qty)),
+                "unit_price_cents": int(unit_price_cents),
+                "note": "Imported from CSV (sold_qty/revenue fallback)",
+            }
+        )
+
+    return rows
+
+
+def _upsert_sales_rows(conn: sqlite3.Connection, contact_id: int, sales_rows: List[Dict[str, Any]]):
+    if not sales_rows:
+        return
+    cur = conn.cursor()
+    for sr in sales_rows:
+        sold_at = str(sr["sold_at"])[:10]
+        product = (sr["product"] or "").strip() or "1 kW"
+        qty = int(sr.get("qty") or 1)
+        unit_price_cents = int(sr.get("unit_price_cents") or 0)
+        note = (sr.get("note") or "").strip() or None
+
+        # Avoid duplicates
+        exists = cur.execute(
+            """
+            SELECT 1 FROM sales
+            WHERE contact_id=? AND sold_at=? AND product=? AND qty=? AND unit_price_cents=?
+            """,
+            (int(contact_id), sold_at, product, int(qty), int(unit_price_cents)),
+        ).fetchone()
+        if exists:
+            continue
+
+        cur.execute(
+            """
+            INSERT INTO sales(contact_id, sold_at, product, qty, unit_price_cents, currency, note)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            (int(contact_id), sold_at, product, int(qty), int(unit_price_cents), "USD", note),
+        )
+    conn.commit()
+
+
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     df = normalize_columns(df).fillna("")
     df["category"] = df.apply(infer_category, axis=1)
@@ -1149,6 +1289,11 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                         (contact_id, ts_iso, note_text, None),
                     )
 
+            # ✅ IMPORTANT: import sales (if present in the uploaded CSV/export)
+            sales_rows = _extract_sales_rows_from_import(r)
+            if sales_rows:
+                _upsert_sales_rows(conn, int(contact_id), sales_rows)
+
             n += 1
 
         except sqlite3.Error as e:
@@ -1176,7 +1321,6 @@ def query_contacts(
     app_filter: List[str],
     prod_filter: List[str],
 ) -> pd.DataFrame:
-    # ✅ FIX: make filters consistent by using lower() comparisons
     sql = """
         SELECT *,
                (SELECT MAX(ts) FROM notes n WHERE n.contact_id = c.id) AS last_note_ts
@@ -1186,15 +1330,8 @@ def query_contacts(
     params: List[Any] = []
 
     if q:
-        like = f"%{q.strip().lower()}%"
-        sql += """
-            AND (
-                lower(COALESCE(first_name,'')) LIKE ?
-                OR lower(COALESCE(last_name,'')) LIKE ?
-                OR lower(COALESCE(email,'')) LIKE ?
-                OR lower(COALESCE(company,'')) LIKE ?
-            )
-        """
+        like = f"%{q}%"
+        sql += " AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR company LIKE ?)"
         params += [like, like, like, like]
 
     if cats:
@@ -1206,8 +1343,8 @@ def query_contacts(
         params += stats
 
     if state_like:
-        sql += " AND lower(COALESCE(state,'')) LIKE ?"
-        params.append(f"%{state_like.strip().lower()}%")
+        sql += " AND state LIKE ?"
+        params.append(f"%{state_like}%")
 
     if app_filter:
         sql += " AND application IN (" + ",".join("?" for _ in app_filter) + ")"
@@ -1217,7 +1354,6 @@ def query_contacts(
         sql += " AND product_interest IN (" + ",".join("?" for _ in prod_filter) + ")"
         params += prod_filter
 
-    sql += " ORDER BY COALESCE(last_name,''), COALESCE(first_name,''), id DESC"
     return pd.read_sql_query(sql, conn, params=params)
 
 
@@ -1265,19 +1401,6 @@ def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status:
 # -------------------------------------------------------------
 # SALES HELPERS
 # -------------------------------------------------------------
-def _usd_to_cents(x: Any) -> Optional[int]:
-    if x is None:
-        return None
-    s = str(x).strip().replace(",", "")
-    if s == "":
-        return None
-    try:
-        val = float(s)
-        return int(round(val * 100))
-    except Exception:
-        return None
-
-
 def add_sale_line(
     conn: sqlite3.Connection,
     contact_id: int,
@@ -1651,6 +1774,7 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
 def show_priority_lists(conn: sqlite3.Connection):
     st.subheader("Customer overview")
 
+    # dashboard strip ON TOP of overview
     show_dashboard_strip(conn)
     st.markdown("---")
 
@@ -1672,13 +1796,13 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     q1, q2, q3 = st.columns([2.6, 1.2, 1.2])
     with q1:
-        picked = st.selectbox("Pick lead", list(options.keys()), format_func=lambda cid: options.get(cid, str(cid)), key="ov_pick_lead")
+        picked = st.selectbox("Pick lead", list(options.keys()), format_func=lambda cid: options.get(cid, str(cid)))
     with q2:
-        new_status = st.selectbox("New status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0, key="ov_new_status")
+        new_status = st.selectbox("New status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0)
     with q3:
         st.write("")
         st.write("")
-        if st.button("Move / Update status", use_container_width=True, key="ov_move_status"):
+        if st.button("Move / Update status", use_container_width=True):
             update_contact_status(conn, int(picked), str(new_status))
             st.success("Updated.")
             st.rerun()
@@ -1747,31 +1871,25 @@ def sidebar_import_export(conn: sqlite3.Connection):
 
 
 # -------------------------------------------------------------
-# FILTERS UI  ✅ FIXED (keys!)
+# FILTERS UI
 # -------------------------------------------------------------
 def filters_ui():
     st.subheader("Filters")
-
-    q = st.text_input("Search (name, email, company)", "", key="flt_q")
+    q = st.text_input("Search (name, email, company)", "")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        cats = st.multiselect(
-            "Category",
-            ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"],
-            [],
-            key="flt_cats",
-        )
+        cats = st.multiselect("Category", ["PhD/Student", "Professor/Academic", "Academic", "Industry", "Other"], [])
     with c2:
-        stats = st.multiselect("Status", PIPELINE, [], key="flt_stats")
+        stats = st.multiselect("Status", PIPELINE, [])
     with c3:
-        st_like = st.text_input("State/Province contains", "", key="flt_state_like")
+        st_like = st.text_input("State/Province contains", "")
 
     c4, c5 = st.columns(2)
     with c4:
-        app_filter = st.multiselect("Application", APPLICATIONS, [], key="flt_apps")
+        app_filter = st.multiselect("Application", APPLICATIONS, [])
     with c5:
-        prod_filter = st.multiselect("Product type interest", PRODUCTS, [], key="flt_prods")
+        prod_filter = st.multiselect("Product type interest", PRODUCTS, [])
 
     return q, cats, stats, st_like, app_filter, prod_filter
 
@@ -1956,7 +2074,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
             st.warning("Deleted.")
             st.rerun()
 
-    # Notes
     st.markdown("#### 📝 Notes")
     notes_df = get_notes(conn, contact_id)
     if not notes_df.empty:
@@ -1983,7 +2100,6 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         else:
             st.info("Empty note ignored.")
 
-    # Sales
     st.markdown("#### 💰 Sales")
     sales_df = get_sales_for_contact(conn, contact_id)
     if not sales_df.empty:
@@ -2034,20 +2150,31 @@ def revenue_histogram(conn: sqlite3.Connection):
     yearly = get_sales_yearly_totals(conn)
     actual = {int(r.year): float(r.revenue_usd) for r in yearly.itertuples(index=False)} if not yearly.empty else {}
 
-    projections = {2026: 200000.0}
+    # projections (only used when a year has NO real sales yet)
+    projections = {
+        2026: 200000.0,
+        2027: 400000.0,
+        2028: 800000.0,
+    }
 
-    years = sorted(set(actual.keys()) | set(projections.keys()) | {2025, 2026})
+    years = sorted(set(actual.keys()) | set(projections.keys()) | {2025, 2026, 2027, 2028})
 
     rows = []
     for y in years:
-        is_projected = False
-        if y in actual and actual[y] > 0:
-            val = actual[y]
+        if y in actual:
+            val = float(actual[y])  # real sales always win, even if small
+            is_projected = False
         else:
             val = float(projections.get(y, 0.0))
             is_projected = (y in projections)
 
-        rows.append({"Year": str(y) + (" (proj)" if is_projected else ""), "Revenue": float(val), "_year_num": int(y)})
+        rows.append(
+            {
+                "Year": str(y) + (" (proj)" if is_projected else ""),
+                "Revenue": float(val),
+                "_year_num": int(y),
+            }
+        )
 
     chart_df = pd.DataFrame(rows).sort_values("_year_num")[["Year", "Revenue"]].reset_index(drop=True)
     st.bar_chart(chart_df, x="Year", y="Revenue")
@@ -2080,9 +2207,9 @@ def main():
     check_login_two_factor_telegram()
 
     st.title(APP_TITLE)
+
     sidebar_import_export(conn)
 
-    # ✅ Tab order: Overview first, Contacts second, Dashboard third
     tab_overview, tab_contacts, tab_dashboard = st.tabs(["🔥 Overview", "📋 Contacts", "📊 Dashboard"])
 
     with tab_overview:
@@ -2103,48 +2230,47 @@ def main():
 
         view = df.copy()
         view["id"] = safe_int_series(view["id"], 0)
-        for c in ["first_name", "last_name", "company", "email", "status", "owner", "application", "product_interest", "last_note_ts"]:
+        for c in [
+            "first_name",
+            "last_name",
+            "company",
+            "email",
+            "status",
+            "owner",
+            "application",
+            "product_interest",
+            "last_note_ts",
+        ]:
             if c not in view.columns:
                 view[c] = ""
         view = view[
-            ["id", "first_name", "last_name", "company", "email", "status", "owner", "application", "product_interest", "last_note_ts"]
+            [
+                "id",
+                "first_name",
+                "last_name",
+                "company",
+                "email",
+                "status",
+                "owner",
+                "application",
+                "product_interest",
+                "last_note_ts",
+            ]
         ].fillna("")
 
         st.dataframe(view, use_container_width=True, hide_index=True)
 
-        # ✅ FIX: robust picker that resets when filters change
-        df2 = df.copy()
-        df2["id"] = safe_int_series(df2["id"], 0)
-
-        options = []
-        labels = []
-        for r in df2.itertuples(index=False):
-            cid = int(r.id)
-            name = f"{(r.first_name or '')} {(r.last_name or '')}".strip() or f"ID {cid}"
-            company = (r.company or "").strip()
-            email = (r.email or "").strip()
-            extra = " — ".join([x for x in [company, email] if x])
-            label = f"{name} — {extra}" if extra else name
-            options.append(cid)
-            labels.append(label)
-
-        if not options:
-            st.info("No contacts match filters.")
-            return
-
-        ss = st.session_state
-        if ss.get("picked_contact_id") not in options:
-            ss["picked_contact_id"] = options[0]
-
+        options = {
+            int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {r.company or ''} ({r.email or ''})"
+            for r in df.itertuples(index=False)
+        }
         picked = st.selectbox(
             "Select contact to edit",
-            options,
-            index=options.index(ss["picked_contact_id"]),
-            format_func=lambda cid: labels[options.index(cid)],
-            key="picked_contact_id",
+            list(options.keys()),
+            format_func=lambda cid: options.get(cid, str(cid)),
         )
 
-        row = df2[df2["id"] == int(picked)].iloc[0]
+        row = df[df["id"] == picked].iloc[0]
         contact_editor(conn, row)
 
     with tab_dashboard:
