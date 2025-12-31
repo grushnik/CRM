@@ -13,13 +13,16 @@ import streamlit.components.v1 as components
 from dateutil import parser as dtparser
 import requests
 
-
 # -------------------------------------------------------------
 # BASIC CONFIG
 # -------------------------------------------------------------
 APP_TITLE = "Radom CRM"
-DB_FILE = "data/radom_crm.db"
-BACKUP_FILE = "data/contacts_backup.csv"
+
+# ✅ Make data paths stable on Streamlit Cloud + local
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+DB_FILE = os.path.join(DATA_DIR, "radom_crm.db")
+BACKUP_FILE = os.path.join(DATA_DIR, "contacts_backup.csv")
 
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
@@ -61,6 +64,14 @@ PIPELINE = [
 
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
 
+# -------------------------------------------------------------
+# ✅ dtype-safe numeric helpers (kills astype(int) crashes)
+# -------------------------------------------------------------
+def safe_int_series(s: pd.Series, default: int = 0) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(default).astype("int64")
+
+def safe_float_series(s: pd.Series, default: float = 0.0) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(default).astype("float64")
 
 # -------------------------------------------------------------
 # ✅ FIX NOTES IMPORT (sanitize + optionally trim email threads)
@@ -75,15 +86,9 @@ _EMAIL_THREAD_MARKERS = (
 )
 
 def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
-    """
-    Converts multi-line CRM-exported notes into a single-line safe note.
-    Optionally trims quoted email threads (everything after 'On ... wrote:' etc.).
-    """
     if v is None:
         return ""
     s = str(v)
-
-    # normalize newlines
     s = s.replace("\r\n", "\n").replace("\r", "\n")
 
     if trim_email_threads:
@@ -98,16 +103,13 @@ def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int 
 
     if max_len and len(s) > max_len:
         s = s[:max_len].rstrip() + "…"
-
     return s
-
 
 # -------------------------------------------------------------
 # 🎄 CHRISTMAS BACKGROUND (SAFE FOR STREAMLIT CLOUD)
 # -------------------------------------------------------------
 def inject_christmas_background():
     import base64
-
     svg = """
     <svg xmlns="http://www.w3.org/2000/svg" width="260" height="260">
       <rect width="260" height="260" fill="none"/>
@@ -152,7 +154,6 @@ def inject_christmas_background():
         unsafe_allow_html=True,
     )
 
-
 # -------------------------------------------------------------
 # URL + FLAGS HELPERS
 # -------------------------------------------------------------
@@ -166,62 +167,19 @@ def _clean_url(v: Any) -> str:
         return s
     return "https://" + s.lstrip("/")
 
-
 _COUNTRY_TO_ISO2 = {
-    "united states": "US",
-    "usa": "US",
-    "u.s.a.": "US",
-    "us": "US",
-    "canada": "CA",
-    "mexico": "MX",
-    "colombia": "CO",
-    "chile": "CL",
-    "peru": "PE",
-    "brazil": "BR",
-    "argentina": "AR",
-    "united kingdom": "GB",
-    "uk": "GB",
-    "england": "GB",
-    "germany": "DE",
-    "france": "FR",
-    "italy": "IT",
-    "spain": "ES",
-    "netherlands": "NL",
-    "belgium": "BE",
-    "sweden": "SE",
-    "norway": "NO",
-    "denmark": "DK",
-    "finland": "FI",
-    "switzerland": "CH",
-    "austria": "AT",
-    "poland": "PL",
-    "czech republic": "CZ",
-    "czechia": "CZ",
-    "slovakia": "SK",
-    "slovenia": "SI",
-    "croatia": "HR",
-    "bosnia and herzegovina": "BA",
-    "serbia": "RS",
-    "romania": "RO",
-    "bulgaria": "BG",
-    "greece": "GR",
-    "turkey": "TR",
-    "russia": "RU",
-    "ukraine": "UA",
-    "israel": "IL",
-    "saudi arabia": "SA",
-    "uae": "AE",
-    "united arab emirates": "AE",
-    "qatar": "QA",
-    "india": "IN",
-    "china": "CN",
-    "japan": "JP",
-    "south korea": "KR",
-    "korea": "KR",
-    "taiwan": "TW",
-    "singapore": "SG",
-    "australia": "AU",
-    "new zealand": "NZ",
+    "united states": "US", "usa": "US", "u.s.a.": "US", "us": "US",
+    "canada": "CA", "mexico": "MX", "colombia": "CO", "chile": "CL", "peru": "PE",
+    "brazil": "BR", "argentina": "AR", "united kingdom": "GB", "uk": "GB", "england": "GB",
+    "germany": "DE", "france": "FR", "italy": "IT", "spain": "ES", "netherlands": "NL",
+    "belgium": "BE", "sweden": "SE", "norway": "NO", "denmark": "DK", "finland": "FI",
+    "switzerland": "CH", "austria": "AT", "poland": "PL", "czech republic": "CZ", "czechia": "CZ",
+    "slovakia": "SK", "slovenia": "SI", "croatia": "HR", "bosnia and herzegovina": "BA",
+    "serbia": "RS", "romania": "RO", "bulgaria": "BG", "greece": "GR", "turkey": "TR",
+    "russia": "RU", "ukraine": "UA", "israel": "IL", "saudi arabia": "SA", "uae": "AE",
+    "united arab emirates": "AE", "qatar": "QA", "india": "IN", "china": "CN", "japan": "JP",
+    "south korea": "KR", "korea": "KR", "taiwan": "TW", "singapore": "SG",
+    "australia": "AU", "new zealand": "NZ",
 }
 
 def flag_img(country: Any, size: int = 18) -> str:
@@ -242,9 +200,8 @@ def flag_img(country: Any, size: int = 18) -> str:
         f"style='vertical-align:middle;border-radius:2px;margin-left:6px;'/>"
     )
 
-
 # -------------------------------------------------------------
-# DEDUPE KEY (core of "no duplicates")
+# DEDUPE KEY
 # -------------------------------------------------------------
 def _norm_text(v: Any) -> str:
     if v is None:
@@ -278,34 +235,28 @@ def _norm_profile(v: Any) -> str:
     return s
 
 def compute_dedupe_key(first: Any, last: Any, company: Any, email: Any, profile_url: Any) -> str:
-    """
-    Priority:
-    1) email
-    2) profile_url
-    3) name+company
-    """
     em = _norm_email(email)
     if em:
         return f"email:{em}"
-
     pr = _norm_profile(profile_url)
     if pr:
         return f"profile:{pr}"
-
     fn = _norm_text(first)
     ln = _norm_text(last)
     co = _norm_company(company)
     if fn or ln or co:
         return f"nameco:{fn}|{ln}|{co}"
-
     return ""
-
 
 # -------------------------------------------------------------
 # TELEGRAM OTP (MULTI-USER)
 # -------------------------------------------------------------
 def _tg_token() -> str:
-    return str(st.secrets.get("TELEGRAM_BOT_TOKEN", "")).strip()
+    # ✅ st.secrets may be empty locally; handle gracefully
+    try:
+        return str(st.secrets.get("TELEGRAM_BOT_TOKEN", "")).strip()
+    except Exception:
+        return ""
 
 def _tg_api(method: str) -> str:
     token = _tg_token()
@@ -330,6 +281,101 @@ def telegram_get_updates() -> Tuple[int, str]:
         return r.status_code, r.text
     except Exception as e:
         return 0, str(e)
+
+def get_conn() -> sqlite3.Connection:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+def init_db(conn: sqlite3.Connection):
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS contacts (
+          id INTEGER PRIMARY KEY,
+          scan_datetime TEXT,
+          first_name TEXT,
+          last_name TEXT,
+          job_title TEXT,
+          company TEXT,
+          street TEXT,
+          street2 TEXT,
+          zip_code TEXT,
+          city TEXT,
+          state TEXT,
+          country TEXT,
+          phone TEXT,
+          email TEXT,
+          website TEXT,
+          category TEXT,
+          status TEXT DEFAULT 'New',
+          owner TEXT,
+          last_touch TEXT,
+          gender TEXT,
+          application TEXT,
+          product_interest TEXT,
+          photo TEXT,
+          profile_url TEXT,
+          dedupe_key TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS notes (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER,
+          ts TEXT,
+          body TEXT,
+          next_followup TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS status_history (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER,
+          ts TEXT,
+          old_status TEXT,
+          new_status TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS telegram_users (
+          username TEXT PRIMARY KEY,
+          chat_id INTEGER,
+          first_seen TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sales (
+          id INTEGER PRIMARY KEY,
+          contact_id INTEGER NOT NULL,
+          sold_at TEXT NOT NULL,
+          product TEXT NOT NULL,
+          qty INTEGER NOT NULL DEFAULT 1,
+          unit_price_cents INTEGER NOT NULL,
+          currency TEXT NOT NULL DEFAULT 'USD',
+          note TEXT,
+          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+        """
+    )
+    # Ensure columns exist even if DB is older
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(contacts)")
+    cols = [row[1] for row in cur.fetchall()]
+    add_cols = {
+        "profile_url": "TEXT",
+        "photo": "TEXT",
+        "owner": "TEXT",
+        "last_touch": "TEXT",
+        "website": "TEXT",
+        "gender": "TEXT",
+        "application": "TEXT",
+        "product_interest": "TEXT",
+        "country": "TEXT",
+        "dedupe_key": "TEXT",
+    }
+    for c, t in add_cols.items():
+        if c not in cols:
+            cur.execute(f"ALTER TABLE contacts ADD COLUMN {c} {t}")
+    conn.commit()
 
 def telegram_find_chat_id_by_username(username: str) -> Optional[int]:
     username = (username or "").strip().lstrip("@")
@@ -410,7 +456,10 @@ def telegram_send_message(chat_id: int, text: str) -> Tuple[bool, str]:
         return False, str(e)
 
 def check_login_two_factor_telegram():
-    expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
+    try:
+        expected = st.secrets.get("APP_PASSWORD", DEFAULT_PASSWORD)
+    except Exception:
+        expected = DEFAULT_PASSWORD
 
     ss = st.session_state
     ss.setdefault("auth_pw_ok", False)
@@ -458,7 +507,6 @@ def check_login_two_factor_telegram():
                 ss["otp_delivery_msg"] = msg if ok else "Failed to send Telegram message."
 
             st.rerun()
-
         st.stop()
 
     if "otp_time" in ss and int(time.time()) - ss["otp_time"] > OTP_TTL_SECONDS:
@@ -503,131 +551,26 @@ def check_login_two_factor_telegram():
             st.write(f"Status: {status}")
             st.code(txt)
 
-        admin_chat_id = st.secrets.get("ADMIN_CHAT_ID", "")
+        try:
+            admin_chat_id = st.secrets.get("ADMIN_CHAT_ID", "")
+        except Exception:
+            admin_chat_id = ""
         if admin_chat_id:
             if st.button("Send test message to admin_chat_id"):
-                ok, msg = telegram_send_message(
-                    int(admin_chat_id),
-                    "✅ Telegram test from Radom CRM (admin_chat_id)",
-                )
+                ok, msg = telegram_send_message(int(admin_chat_id), "✅ Telegram test from Radom CRM (admin_chat_id)")
                 st.write("Test message sent." if ok else "Failed to send.")
                 st.code(msg)
         else:
             st.caption("Tip: set ADMIN_CHAT_ID in secrets to enable test-send button.")
-
     st.stop()
 
-
 # -------------------------------------------------------------
-# DB + BACKUP HELPERS
+# BACKUP / RESTORE
 # -------------------------------------------------------------
-def get_conn() -> sqlite3.Connection:
-    os.makedirs("data", exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
-
-def _col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
-    return any(r[1] == col for r in cur.fetchall())
-
-def init_db(conn: sqlite3.Connection):
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS contacts (
-          id INTEGER PRIMARY KEY,
-          scan_datetime TEXT,
-          first_name TEXT,
-          last_name TEXT,
-          job_title TEXT,
-          company TEXT,
-          street TEXT,
-          street2 TEXT,
-          zip_code TEXT,
-          city TEXT,
-          state TEXT,
-          country TEXT,
-          phone TEXT,
-          email TEXT UNIQUE,
-          website TEXT,
-          category TEXT,
-          status TEXT DEFAULT 'New',
-          owner TEXT,
-          last_touch TEXT,
-          gender TEXT,
-          application TEXT,
-          product_interest TEXT,
-          photo TEXT,
-          profile_url TEXT,
-          dedupe_key TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS notes (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER,
-          ts TEXT,
-          body TEXT,
-          next_followup TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS status_history (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER,
-          ts TEXT,
-          old_status TEXT,
-          new_status TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS telegram_users (
-          username TEXT PRIMARY KEY,
-          chat_id INTEGER,
-          first_seen TEXT
-        );
-
-        -- ✅ Sales line-items (torches sold)
-        CREATE TABLE IF NOT EXISTS sales (
-          id INTEGER PRIMARY KEY,
-          contact_id INTEGER NOT NULL,
-          sold_at TEXT NOT NULL,
-          product TEXT NOT NULL,
-          qty INTEGER NOT NULL DEFAULT 1,
-          unit_price_cents INTEGER NOT NULL,
-          currency TEXT NOT NULL DEFAULT 'USD',
-          note TEXT,
-          FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
-        );
-        """
-    )
-
-    cur = conn.cursor()
-    cur.execute("PRAGMA table_info(contacts)")
-    cols = [row[1] for row in cur.fetchall()]
-
-    add_cols = {
-        "profile_url": "TEXT",
-        "photo": "TEXT",
-        "owner": "TEXT",
-        "last_touch": "TEXT",
-        "website": "TEXT",
-        "gender": "TEXT",
-        "application": "TEXT",
-        "product_interest": "TEXT",
-        "country": "TEXT",
-        "dedupe_key": "TEXT",
-    }
-    for c, t in add_cols.items():
-        if c not in cols:
-            cur.execute(f"ALTER TABLE contacts ADD COLUMN {c} {t}")
-
-    conn.commit()
-
 def backup_contacts(conn: sqlite3.Connection):
     df = pd.read_sql_query("SELECT * FROM contacts", conn)
     if not df.empty:
-        os.makedirs("data", exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
         df.to_csv(BACKUP_FILE, index=False)
 
 def restore_from_backup_if_empty(conn: sqlite3.Connection):
@@ -642,10 +585,23 @@ def restore_from_backup_if_empty(conn: sqlite3.Connection):
         except Exception as e:
             print(f"Backup restore failed: {e}")
 
+# -------------------------------------------------------------
+# DEDUPE
+# -------------------------------------------------------------
+def ensure_dedupe_index(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_dedupe_key
+            ON contacts(dedupe_key)
+            WHERE dedupe_key IS NOT NULL AND TRIM(dedupe_key) <> ''
+            """
+        )
+        conn.commit()
+    except Exception:
+        pass
 
-# -------------------------------------------------------------
-# SAFE DEDUPE
-# -------------------------------------------------------------
 def dedupe_database(conn: sqlite3.Connection) -> int:
     cur = conn.cursor()
     try:
@@ -656,14 +612,10 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
     cur.execute("UPDATE contacts SET dedupe_key=NULL")
     conn.commit()
 
-    rows = cur.execute(
-        "SELECT id, first_name, last_name, company, email, profile_url FROM contacts"
-    ).fetchall()
-
+    rows = cur.execute("SELECT id, first_name, last_name, company, email, profile_url FROM contacts").fetchall()
     for (cid, first, last, company, email, profile_url) in rows:
         key = compute_dedupe_key(first, last, company, email, profile_url)
         cur.execute("UPDATE contacts SET dedupe_key=? WHERE id=?", (key or None, cid))
-
     conn.commit()
 
     dup_keys = cur.execute(
@@ -677,12 +629,10 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
     ).fetchall()
 
     deleted = 0
-
     for (k,) in dup_keys:
         ids = [r[0] for r in cur.execute(
             "SELECT id FROM contacts WHERE dedupe_key=? ORDER BY id ASC", (k,)
         ).fetchall()]
-
         if len(ids) <= 1:
             continue
 
@@ -694,55 +644,13 @@ def dedupe_database(conn: sqlite3.Connection) -> int:
             cur.execute("UPDATE status_history SET contact_id=? WHERE contact_id=?", (winner, lose_id))
             cur.execute("UPDATE sales SET contact_id=? WHERE contact_id=?", (winner, lose_id))
 
-        cur.execute(
-            "DELETE FROM contacts WHERE id IN (" + ",".join("?" for _ in losers) + ")",
-            losers
-        )
+        cur.execute("DELETE FROM contacts WHERE id IN (" + ",".join("?" for _ in losers) + ")", losers)
         deleted += len(losers)
 
     conn.commit()
-
-    try:
-        cur.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_dedupe_key
-            ON contacts(dedupe_key)
-            WHERE dedupe_key IS NOT NULL AND TRIM(dedupe_key) <> ''
-            """
-        )
-        conn.commit()
-    except Exception:
-        pass
-
+    ensure_dedupe_index(conn)
     backup_contacts(conn)
     return deleted
-
-def ensure_dedupe_index(conn: sqlite3.Connection):
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_dedupe_key
-            ON contacts(dedupe_key)
-            WHERE dedupe_key IS NOT NULL AND TRIM(dedupe_key) <> ''
-            """
-        )
-        conn.commit()
-        return
-    except Exception:
-        dedupe_database(conn)
-        try:
-            cur.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_dedupe_key
-                ON contacts(dedupe_key)
-                WHERE dedupe_key IS NOT NULL AND TRIM(dedupe_key) <> ''
-                """
-            )
-            conn.commit()
-        except Exception:
-            pass
-
 
 # -------------------------------------------------------------
 # IMPORT / NORMALIZATION
@@ -797,43 +705,17 @@ COLMAP = {
 }
 
 EXPECTED = [
-    "scan_datetime",
-    "first_name",
-    "last_name",
-    "job_title",
-    "company",
-    "street",
-    "street2",
-    "zip_code",
-    "city",
-    "state",
-    "country",
-    "phone",
-    "email",
-    "website",
-    "notes",
-    "gender",
-    "application",
-    "product_interest",
-    "status",
-    "owner",
-    "last_touch",
-    "photo",
-    "profile_url",
+    "scan_datetime","first_name","last_name","job_title","company","street","street2","zip_code",
+    "city","state","country","phone","email","website","notes","gender","application",
+    "product_interest","status","owner","last_touch","photo","profile_url",
 ]
 
 STUDENT_PAT = re.compile(r"\b(phd|ph\.d|student|undergrad|graduate)\b", re.I)
 PROF_PAT = re.compile(r"\b(assistant|associate|full)?\s*professor\b|department chair", re.I)
-IND_PAT = re.compile(
-    r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b",
-    re.I,
-)
+IND_PAT = re.compile(r"\b(director|manager|engineer|scientist|vp|founder|ceo|cto|lead|principal)\b", re.I)
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    new_cols = {
-        c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower())
-        for c in df.columns
-    }
+    new_cols = {c: COLMAP.get(str(c).strip().lower(), str(c).strip().lower()) for c in df.columns}
     df = df.rename(columns=new_cols)
     for c in EXPECTED:
         if c not in df.columns:
@@ -894,58 +776,33 @@ def normalize_application(val: Any) -> Optional[str]:
     for app in APPLICATIONS:
         if s == app.lower():
             return app
-
-    if "pfas" in s:
-        return "PFAS destruction"
-    if "co2" in s or "carbon dioxide" in s:
-        return "CO2 conversion"
-    if "waste" in s or "gasification" in s or "rdf" in s:
-        return "Waste-to-Energy"
-    if "nox" in s or "nitric" in s or "nitrate" in s:
-        return "NOx production"
-    if "nitrification" in s:
-        return "Nitrification"
-    if "hydrogen" in s or "h2" in s:
-        return "Hydrogen production"
-    if "carbon black" in s or "soot" in s:
-        return "Carbon black production"
-    if "mining" in s or "tailings" in s:
-        return "Mining waste"
-    if "reentry" in s or "re-entry" in s:
-        return "Reentry"
-    if "propulsion" in s or "rocket" in s or "thruster" in s:
-        return "Propulsion"
-    if "methane" in s or "reforming" in s or "steam reforming" in s:
-        return "Methane reforming"
-    if "communication" in s:
-        return "Communication"
-    if "ultrasonic" in s or "ultrasound" in s:
-        return "Ultrasonic"
-    if "surface" in s and ("treat" in s or "coating" in s or "modify" in s):
-        return "Surface treatment"
+    if "pfas" in s: return "PFAS destruction"
+    if "co2" in s or "carbon dioxide" in s: return "CO2 conversion"
+    if "waste" in s or "gasification" in s or "rdf" in s: return "Waste-to-Energy"
+    if "nox" in s or "nitric" in s or "nitrate" in s: return "NOx production"
+    if "nitrification" in s: return "Nitrification"
+    if "hydrogen" in s or "h2" in s: return "Hydrogen production"
+    if "carbon black" in s or "soot" in s: return "Carbon black production"
+    if "mining" in s or "tailings" in s: return "Mining waste"
+    if "reentry" in s or "re-entry" in s: return "Reentry"
+    if "propulsion" in s or "rocket" in s or "thruster" in s: return "Propulsion"
+    if "methane" in s or "reforming" in s or "steam reforming" in s: return "Methane reforming"
+    if "communication" in s: return "Communication"
+    if "ultrasonic" in s or "ultrasound" in s: return "Ultrasonic"
+    if "surface" in s and ("treat" in s or "coating" in s or "modify" in s): return "Surface treatment"
     return None
 
-
-# -------------------------------------------------------------
-# FLEXIBLE FILE LOADER
-# -------------------------------------------------------------
 def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     cols_lower = [str(c).strip().lower() for c in df.columns]
     if "first_name" in cols_lower or "first name" in cols_lower:
         return df
     if df.empty:
         return df
-
     first_row = df.iloc[0]
-    first_vals = [
-        "" if (isinstance(v, float) and pd.isna(v)) else str(v).strip()
-        for v in first_row
-    ]
+    first_vals = ["" if (isinstance(v, float) and pd.isna(v)) else str(v).strip() for v in first_row]
     first_vals_lower = [v.lower() for v in first_vals]
-
     known = set(COLMAP.keys()) | set(EXPECTED)
     score = sum(1 for v in first_vals_lower if v in known)
-
     if score >= 3:
         new_cols = []
         for i, val in enumerate(first_vals_lower):
@@ -964,7 +821,6 @@ def load_contacts_file(uploaded_file) -> pd.DataFrame:
         df = pd.read_excel(uploaded_file)
     return _fix_header_row_if_needed(df)
 
-
 # -------------------------------------------------------------
 # UPSERT (NO DUPLICATES)
 # -------------------------------------------------------------
@@ -973,17 +829,14 @@ def _find_existing_contact_id(cur: sqlite3.Cursor, dedupe_key: str, email: Optio
         row = cur.execute("SELECT id FROM contacts WHERE email=?", (email,)).fetchone()
         if row:
             return int(row[0])
-
     if profile_url:
         row = cur.execute("SELECT id FROM contacts WHERE lower(profile_url)=?", (profile_url.lower(),)).fetchone()
         if row:
             return int(row[0])
-
     if dedupe_key:
         row = cur.execute("SELECT id FROM contacts WHERE dedupe_key=?", (dedupe_key,)).fetchone()
         if row:
             return int(row[0])
-
     return None
 
 def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
@@ -997,7 +850,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
     for idx, r in df.iterrows():
         email = (_norm_email(r.get("email")) or None)
-
         raw_note = r.get("notes")
         note_text = sanitize_note_text(raw_note, trim_email_threads=True)
 
@@ -1023,7 +875,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         profile_url = _clean_url(r.get("profile_url") or "") or None
 
         status_from_file = r.get("status_norm") or None
-
         dedupe_key = compute_dedupe_key(first, last, company, email, profile_url) or None
 
         try:
@@ -1038,10 +889,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             if existing_id:
                 if (existing_status or "New").strip() != (final_status or "New").strip():
                     cur.execute(
-                        """
-                        INSERT INTO status_history(contact_id, ts, old_status, new_status)
-                        VALUES (?,?,?,?)
-                        """,
+                        "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
                         (existing_id, datetime.utcnow().isoformat(), (existing_status or "New").strip(), (final_status or "New").strip()),
                     )
 
@@ -1075,31 +923,9 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     WHERE id=?
                     """,
                     (
-                        scan_dt,
-                        first,
-                        last,
-                        job,
-                        company,
-                        street,
-                        street2,
-                        zipc,
-                        city,
-                        state,
-                        country,
-                        phone,
-                        email,
-                        website,
-                        r.get("category") or "Other",
-                        final_status,
-                        owner,
-                        last_touch,
-                        gender,
-                        application,
-                        product_interest,
-                        photo,
-                        profile_url,
-                        dedupe_key,
-                        existing_id,
+                        scan_dt, first, last, job, company, street, street2, zipc, city, state, country,
+                        phone, email, website, r.get("category") or "Other", final_status, owner, last_touch,
+                        gender, application, product_interest, photo, profile_url, dedupe_key, existing_id
                     ),
                 )
                 contact_id = existing_id
@@ -1107,57 +933,15 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 cur.execute(
                     """
                     INSERT INTO contacts (
-                      scan_datetime,
-                      first_name,
-                      last_name,
-                      job_title,
-                      company,
-                      street,
-                      street2,
-                      zip_code,
-                      city,
-                      state,
-                      country,
-                      phone,
-                      email,
-                      website,
-                      category,
-                      status,
-                      owner,
-                      last_touch,
-                      gender,
-                      application,
-                      product_interest,
-                      photo,
-                      profile_url,
-                      dedupe_key
+                      scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
+                      city, state, country, phone, email, website, category, status, owner, last_touch,
+                      gender, application, product_interest, photo, profile_url, dedupe_key
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        scan_dt,
-                        first,
-                        last,
-                        job,
-                        company,
-                        street,
-                        street2,
-                        zipc,
-                        city,
-                        state,
-                        country,
-                        phone,
-                        email,
-                        website,
-                        r.get("category") or "Other",
-                        final_status,
-                        owner,
-                        last_touch,
-                        gender,
-                        application,
-                        product_interest,
-                        photo,
-                        profile_url,
-                        dedupe_key,
+                        scan_dt, first, last, job, company, street, street2, zipc, city, state, country,
+                        phone, email, website, r.get("category") or "Other", final_status, owner, last_touch,
+                        gender, application, product_interest, photo, profile_url, dedupe_key
                     ),
                 )
                 contact_id = cur.lastrowid
@@ -1184,7 +968,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     backup_contacts(conn)
     ensure_dedupe_index(conn)
     return n
-
 
 # -------------------------------------------------------------
 # QUERIES & NOTES
@@ -1264,19 +1047,15 @@ def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status:
 
     ts_iso = datetime.utcnow().isoformat()
     cur.execute(
-        """
-        INSERT INTO status_history(contact_id, ts, old_status, new_status)
-        VALUES (?,?,?,?)
-        """,
+        "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
         (contact_id, ts_iso, old_status, new_status),
     )
     cur.execute("UPDATE contacts SET status=?, last_touch=? WHERE id=?", (new_status, ts_iso, contact_id))
     conn.commit()
     backup_contacts(conn)
 
-
 # -------------------------------------------------------------
-# ✅ SALES HELPERS
+# SALES HELPERS
 # -------------------------------------------------------------
 def _usd_to_cents(x: Any) -> Optional[int]:
     if x is None:
@@ -1331,15 +1110,6 @@ def delete_sale_line(conn: sqlite3.Connection, sale_id: int):
     conn.commit()
 
 def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
-    """
-    Per-contact:
-      - sold_qty
-      - sold_revenue_cents/usd
-      - first/last sold_at
-      - sales_lines summary string
-
-    This function is intentionally dtype-safe to avoid merge -> object -> astype(int) crashes.
-    """
     df = pd.read_sql_query(
         """
         SELECT
@@ -1353,7 +1123,6 @@ def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
         """,
         conn,
     )
-
     if df.empty:
         return pd.DataFrame(
             {
@@ -1367,21 +1136,26 @@ def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
             }
         )
 
+    df["contact_id"] = safe_int_series(df["contact_id"], 0)
+    df["sold_qty"] = safe_int_series(df["sold_qty"], 0)
+    df["sold_revenue_cents"] = safe_int_series(df["sold_revenue_cents"], 0)
+
     df_lines = pd.read_sql_query(
-        """
-        SELECT contact_id, sold_at, product, qty, unit_price_cents
-        FROM sales
-        ORDER BY sold_at ASC, id ASC
-        """,
+        "SELECT contact_id, sold_at, product, qty, unit_price_cents FROM sales ORDER BY sold_at ASC, id ASC",
         conn,
     )
 
     def fmt_line(r):
         d = (str(r["sold_at"]) or "")[:10]
-        price = int(r["unit_price_cents"]) / 100.0
-        return f"{d}: {r['product']} x{int(r['qty'])} @ ${price:,.0f}"
+        price = int(pd.to_numeric(r["unit_price_cents"], errors="coerce") or 0) / 100.0
+        q = int(pd.to_numeric(r["qty"], errors="coerce") or 0)
+        return f"{d}: {r['product']} x{q} @ ${price:,.0f}"
 
     if not df_lines.empty:
+        df_lines["contact_id"] = safe_int_series(df_lines["contact_id"], 0)
+        df_lines["qty"] = safe_int_series(df_lines["qty"], 0)
+        df_lines["unit_price_cents"] = safe_int_series(df_lines["unit_price_cents"], 0)
+
         lines = (
             df_lines.assign(_l=df_lines.apply(fmt_line, axis=1))
             .groupby("contact_id")["_l"]
@@ -1392,13 +1166,10 @@ def get_sales_agg(conn: sqlite3.Connection) -> pd.DataFrame:
     else:
         df["sales_lines"] = ""
 
-    df["sold_revenue_usd"] = df["sold_revenue_cents"] / 100.0
+    df["sold_revenue_usd"] = safe_float_series(df["sold_revenue_cents"], 0.0) / 100.0
     return df
 
 def get_sales_yearly_totals(conn: sqlite3.Connection) -> pd.DataFrame:
-    """
-    Returns: year, revenue_usd, qty
-    """
     df = pd.read_sql_query(
         """
         SELECT
@@ -1413,12 +1184,13 @@ def get_sales_yearly_totals(conn: sqlite3.Connection) -> pd.DataFrame:
     )
     if df.empty:
         return pd.DataFrame(columns=["year", "qty", "revenue_usd"])
+    df["qty"] = safe_int_series(df["qty"], 0)
+    df["revenue_cents"] = safe_int_series(df["revenue_cents"], 0)
     df["revenue_usd"] = df["revenue_cents"] / 100.0
     return df[["year", "qty", "revenue_usd"]]
 
-
 # -------------------------------------------------------------
-# ✅ CRM STATS: conversion + speed
+# CRM STATS: conversion + speed
 # -------------------------------------------------------------
 def _try_parse_iso(ts: Any) -> Optional[datetime]:
     if ts is None:
@@ -1432,12 +1204,6 @@ def _try_parse_iso(ts: Any) -> Optional[datetime]:
         return None
 
 def get_conversion_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """
-    - contacted_count: leads that ever hit Contacted (or beyond)
-    - won_count: leads that are Won OR have any sale
-    - conversion_rate
-    - avg_days_contacted_to_win (based on first Contacted -> first sale or first Won)
-    """
     df_hist = pd.read_sql_query(
         "SELECT contact_id, ts, new_status FROM status_history ORDER BY contact_id, ts",
         conn,
@@ -1486,14 +1252,9 @@ def get_conversion_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
 
     deltas = []
     for cid, t_contacted in first_contacted.items():
-        t_win = None
-        if cid in first_sold:
-            t_win = first_sold[cid]
-        elif cid in first_won_status:
-            t_win = first_won_status[cid]
+        t_win = first_sold.get(cid) or first_won_status.get(cid)
         if t_win and t_win >= t_contacted:
             deltas.append((t_win - t_contacted).total_seconds() / 86400.0)
-
     avg_days = sum(deltas) / len(deltas) if deltas else None
 
     return {
@@ -1504,13 +1265,12 @@ def get_conversion_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
         "speed_n": len(deltas),
     }
 
-
 # -------------------------------------------------------------
-# ✅ TOP COUNTERS (torches + revenue)
+# TOP COUNTERS (torches + revenue)
 # -------------------------------------------------------------
 def show_sales_counters(conn: sqlite3.Connection):
     df_qty = pd.read_sql_query("SELECT COALESCE(SUM(qty),0) AS q FROM sales", conn)
-    total_qty = int(df_qty.iloc[0]["q"]) if not df_qty.empty else 0
+    total_qty = int(pd.to_numeric(df_qty.iloc[0]["q"], errors="coerce") or 0) if not df_qty.empty else 0
 
     yearly = get_sales_yearly_totals(conn)
     year_map = {int(r.year): float(r.revenue_usd) for r in yearly.itertuples(index=False)} if not yearly.empty else {}
@@ -1557,18 +1317,13 @@ def show_sales_counters(conn: sqlite3.Connection):
         """,
         unsafe_allow_html=True,
     )
-    if companies:
-        st.caption("Sold to: " + " • ".join(companies))
-    else:
-        st.caption("Sold to: no customers yet")
-
+    st.caption("Sold to: " + " • ".join(companies) if companies else "Sold to: no customers yet")
 
 # -------------------------------------------------------------
-# HOT / POTENTIAL / COLD OVERVIEW (HTML COMPONENTS)
+# PRIORITY LISTS (HTML)
 # -------------------------------------------------------------
 def _render_lead_list(title_html: str, df: pd.DataFrame):
     st.markdown(title_html, unsafe_allow_html=True)
-
     if df.empty:
         st.caption("No leads in this group.")
         return
@@ -1589,34 +1344,25 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
         application = (sub.get("application") or "").strip()
 
         meta_bits = []
-        if company:
-            meta_bits.append(company)
-        if email:
-            meta_bits.append(email)
-        if product:
-            meta_bits.append(f"interested in {product}")
-        if application:
-            meta_bits.append(f"application: {application}")
+        if company: meta_bits.append(company)
+        if email: meta_bits.append(email)
+        if product: meta_bits.append(f"interested in {product}")
+        if application: meta_bits.append(f"application: {application}")
         meta = " • ".join(meta_bits) if meta_bits else "—"
 
         if profile:
-            profile_icon_html = (
-                f"<a href='{profile}' target='_blank' "
-                f"style='text-decoration:none;font-size:16px;'>👤</a>"
-            )
+            profile_icon_html = f"<a href='{profile}' target='_blank' style='text-decoration:none;font-size:16px;'>👤</a>"
         else:
             profile_icon_html = "<span style='font-size:16px;'>👤</span>"
 
         status_badge = (
-            f"<span style='padding:2px 8px;border-radius:999px;"
-            f"background:rgba(255,255,255,0.10);font-size:12px;'>{status}</span>"
+            f"<span style='padding:2px 8px;border-radius:999px;background:rgba(255,255,255,0.10);font-size:12px;'>{status}</span>"
             if status else ""
         )
 
         rows_html.append(f"""
         <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.08);">
           <div style="flex:0 0 auto;margin-top:2px;">{profile_icon_html}</div>
-
           <div style="flex:1 1 auto;min-width:0;">
             <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
               <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
@@ -1624,19 +1370,12 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
               </div>
               <div style="flex:0 0 auto;">{status_badge}</div>
             </div>
-
-            <div style="font-size:12px;opacity:0.75;margin-top:2px;line-height:1.2;">
-              {meta}
-            </div>
+            <div style="font-size:12px;opacity:0.75;margin-top:2px;line-height:1.2;">{meta}</div>
           </div>
         </div>
         """)
 
-    block = f"""
-    <div style="font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial;">
-      {''.join(rows_html)}
-    </div>
-    """
+    block = f"<div style='font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial;'>{''.join(rows_html)}</div>"
     est_height = min(1200, 54 * len(df) + 60)
     components.html(block, height=est_height, scrolling=True)
 
@@ -1686,7 +1425,6 @@ def show_priority_lists(conn: sqlite3.Connection):
         """
         _render_lead_list(cold_header, cold_raw)
 
-
 # -------------------------------------------------------------
 # SIDEBAR IMPORT / EXPORT + DEDUPE BUTTON
 # -------------------------------------------------------------
@@ -1706,13 +1444,12 @@ def sidebar_import_export(conn: sqlite3.Connection):
         st.rerun()
 
     total = pd.read_sql_query("SELECT COUNT(*) n FROM contacts", conn).iloc[0]["n"]
-    st.sidebar.caption(f"Total contacts: **{total}**")
+    st.sidebar.caption(f"Total contacts: **{int(total)}**")
 
     export_df = st.session_state.get("export_df")
     if isinstance(export_df, pd.DataFrame) and not export_df.empty:
         csv_bytes = export_df.to_csv(index=False, quoting=csv.QUOTE_ALL).encode("utf-8")
         st.sidebar.download_button("Download Contacts CSV (filtered)", csv_bytes, file_name="radom-contacts.csv")
-
 
 # -------------------------------------------------------------
 # FILTERS UI
@@ -1737,286 +1474,263 @@ def filters_ui():
 
     return q, cats, stats, st_like, app_filter, prod_filter
 
-
 # -------------------------------------------------------------
 # CONTACT EDITOR + NOTES + SALES
 # -------------------------------------------------------------
-def _safe_str(x: Any) -> str:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    return str(x)
-
-def _fmt_money_from_cents(cents: Any) -> str:
-    try:
-        return f"${int(cents)/100.0:,.0f}"
-    except Exception:
-        return "$0"
-
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
-
     contact_id = int(row["id"])
-    first = _safe_str(row.get("first_name")).strip()
-    last = _safe_str(row.get("last_name")).strip()
-    company = _safe_str(row.get("company")).strip()
 
-    st.markdown(f"### ✏️ {first} {last} — {company}".strip(" —"))
-    st.caption(f"Status: {row.get('status') or 'New'} | Application: {row.get('application') or '—'}")
+    st.markdown(f"### ✏️ {row.get('first_name','')} {row.get('last_name','')} — {row.get('company') or ''}")
+    st.caption(
+        f"Status: {row.get('status') or 'New'} | "
+        f"Application: {row.get('application') or ''} | "
+        f"Product: {row.get('product_interest') or ''}"
+    )
 
-    # quick links
-    cols_top = st.columns([1, 1, 1, 2])
-    with cols_top[0]:
-        profile = _clean_url(row.get("profile_url") or "")
-        if profile:
-            st.link_button("LinkedIn/Profile", profile)
-    with cols_top[1]:
-        website = _clean_url(row.get("website") or "")
-        if website:
-            st.link_button("Website", website)
-    with cols_top[2]:
-        email = _safe_str(row.get("email")).strip()
-        if email:
-            st.write(email)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        first_name = st.text_input("First name", value=str(row.get("first_name") or ""), key=f"fn_{contact_id}")
+        last_name = st.text_input("Last name", value=str(row.get("last_name") or ""), key=f"ln_{contact_id}")
+        job_title = st.text_input("Job title", value=str(row.get("job_title") or ""), key=f"jt_{contact_id}")
+    with c2:
+        company = st.text_input("Company", value=str(row.get("company") or ""), key=f"co_{contact_id}")
+        email = st.text_input("Email", value=str(row.get("email") or ""), key=f"em_{contact_id}")
+        phone = st.text_input("Phone", value=str(row.get("phone") or ""), key=f"ph_{contact_id}")
+    with c3:
+        website = st.text_input("Website", value=str(row.get("website") or ""), key=f"wb_{contact_id}")
+        profile_url = st.text_input("LinkedIn/Profile URL", value=str(row.get("profile_url") or ""), key=f"li_{contact_id}")
+        owner = st.selectbox("Owner", OWNERS, index=OWNERS.index(row.get("owner") or "") if (row.get("owner") or "") in OWNERS else 0, key=f"ow_{contact_id}")
 
-    # ---- EDIT FIELDS
-    with st.expander("Edit contact details", expanded=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            first_name = st.text_input("First name", value=_safe_str(row.get("first_name")), key=f"edit_fn_{contact_id}")
-            last_name = st.text_input("Last name", value=_safe_str(row.get("last_name")), key=f"edit_ln_{contact_id}")
-            job_title = st.text_input("Job title", value=_safe_str(row.get("job_title")), key=f"edit_job_{contact_id}")
-        with c2:
-            company_in = st.text_input("Company", value=_safe_str(row.get("company")), key=f"edit_co_{contact_id}")
-            email_in = st.text_input("Email", value=_safe_str(row.get("email")), key=f"edit_email_{contact_id}")
-            phone_in = st.text_input("Phone", value=_safe_str(row.get("phone")), key=f"edit_phone_{contact_id}")
-        with c3:
-            status_in = st.selectbox("Status", PIPELINE, index=PIPELINE.index((row.get("status") or "New")) if (row.get("status") or "New") in PIPELINE else 0, key=f"edit_status_{contact_id}")
-            owner_in = st.selectbox("Owner", OWNERS, index=OWNERS.index(row.get("owner")) if row.get("owner") in OWNERS else 0, key=f"edit_owner_{contact_id}")
-            country_in = st.text_input("Country", value=_safe_str(row.get("country")), key=f"edit_country_{contact_id}")
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        status = st.selectbox(
+            "Status",
+            PIPELINE,
+            index=PIPELINE.index((row.get("status") or "New")) if (row.get("status") or "New") in PIPELINE else 0,
+            key=f"st_{contact_id}",
+        )
+        gender = st.text_input("Gender", value=str(row.get("gender") or ""), key=f"ge_{contact_id}")
+    with c5:
+        application = st.selectbox(
+            "Application",
+            [""] + APPLICATIONS,
+            index=([""] + APPLICATIONS).index(row.get("application") or "") if (row.get("application") or "") in ([""] + APPLICATIONS) else 0,
+            key=f"ap_{contact_id}",
+        )
+        product_interest = st.selectbox(
+            "Product interest",
+            [""] + PRODUCTS,
+            index=([""] + PRODUCTS).index(row.get("product_interest") or "") if (row.get("product_interest") or "") in ([""] + PRODUCTS) else 0,
+            key=f"pi_{contact_id}",
+        )
+    with c6:
+        country = st.text_input("Country", value=str(row.get("country") or ""), key=f"ct_{contact_id}")
+        state = st.text_input("State/Province", value=str(row.get("state") or ""), key=f"stt_{contact_id}")
+        city = st.text_input("City", value=str(row.get("city") or ""), key=f"ci_{contact_id}")
 
-        c4, c5, c6 = st.columns(3)
-        with c4:
-            application_in = st.selectbox(
-                "Application",
-                [""] + APPLICATIONS,
-                index=([""] + APPLICATIONS).index(row.get("application") or "") if (row.get("application") or "") in ([""] + APPLICATIONS) else 0,
-                key=f"edit_app_{contact_id}",
+    addr1 = st.text_input("Street", value=str(row.get("street") or ""), key=f"a1_{contact_id}")
+    addr2 = st.text_input("Street 2", value=str(row.get("street2") or ""), key=f"a2_{contact_id}")
+    zip_code = st.text_input("Zip", value=str(row.get("zip_code") or ""), key=f"zp_{contact_id}")
+
+    dedupe_key = compute_dedupe_key(first_name, last_name, company, email, profile_url)
+
+    csave1, csave2, _ = st.columns([1, 1, 3])
+    with csave1:
+        if st.button("💾 Save contact", key=f"save_{contact_id}"):
+            current_status = (row.get("status") or "New").strip()
+            new_status = (status or "New").strip()
+            if current_status != new_status:
+                update_contact_status(conn, contact_id, new_status)
+
+            conn.execute(
+                """
+                UPDATE contacts SET
+                  first_name=?,
+                  last_name=?,
+                  job_title=?,
+                  company=?,
+                  street=?,
+                  street2=?,
+                  zip_code=?,
+                  city=?,
+                  state=?,
+                  country=?,
+                  phone=?,
+                  email=?,
+                  website=?,
+                  owner=?,
+                  gender=?,
+                  application=?,
+                  product_interest=?,
+                  profile_url=?,
+                  dedupe_key=?
+                WHERE id=?
+                """,
+                (
+                    first_name.strip() or None,
+                    last_name.strip() or None,
+                    job_title.strip() or None,
+                    company.strip() or None,
+                    addr1.strip() or None,
+                    addr2.strip() or None,
+                    zip_code.strip() or None,
+                    city.strip() or None,
+                    state.strip() or None,
+                    country.strip() or None,
+                    phone.strip() or None,
+                    _norm_email(email) or None,
+                    _clean_url(website) or None,
+                    owner.strip() or None,
+                    gender.strip() or None,
+                    normalize_application(application) if application else None,
+                    product_interest.strip() or None,
+                    _clean_url(profile_url) or None,
+                    dedupe_key or None,
+                    contact_id,
+                ),
             )
-        with c5:
-            product_in = st.selectbox(
-                "Product interest",
-                [""] + PRODUCTS,
-                index=([""] + PRODUCTS).index(row.get("product_interest") or "") if (row.get("product_interest") or "") in ([""] + PRODUCTS) else 0,
-                key=f"edit_prod_{contact_id}",
-            )
-        with c6:
-            profile_in = st.text_input("Profile URL", value=_safe_str(row.get("profile_url")), key=f"edit_profile_{contact_id}")
-
-        website_in = st.text_input("Website URL", value=_safe_str(row.get("website")), key=f"edit_web_{contact_id}")
-
-        # save
-        if st.button("Save contact changes", key=f"btn_save_contact_{contact_id}"):
-            # status change should go through status_history
-            old_status = (row.get("status") or "New").strip()
-            if status_in.strip() != old_status:
-                update_contact_status(conn, contact_id, status_in.strip())
-            else:
-                conn.execute(
-                    """
-                    UPDATE contacts SET
-                      first_name=?,
-                      last_name=?,
-                      job_title=?,
-                      company=?,
-                      email=?,
-                      phone=?,
-                      owner=?,
-                      country=?,
-                      application=?,
-                      product_interest=?,
-                      profile_url=?,
-                      website=?
-                    WHERE id=?
-                    """,
-                    (
-                        first_name.strip() or None,
-                        last_name.strip() or None,
-                        job_title.strip() or None,
-                        company_in.strip() or None,
-                        (email_in.strip().lower() or None),
-                        phone_in.strip() or None,
-                        owner_in.strip() or None,
-                        country_in.strip() or None,
-                        (application_in.strip() or None),
-                        (product_in.strip() or None),
-                        (_clean_url(profile_in) or None),
-                        (_clean_url(website_in) or None),
-                        int(contact_id),
-                    ),
-                )
-                conn.commit()
-                backup_contacts(conn)
-
-            # update dedupe key (safe)
-            dk = compute_dedupe_key(first_name, last_name, company_in, email_in, profile_in) or None
-            try:
-                conn.execute("UPDATE contacts SET dedupe_key=? WHERE id=?", (dk, int(contact_id)))
-                conn.commit()
-                ensure_dedupe_index(conn)
-            except Exception:
-                pass
-
+            conn.commit()
+            backup_contacts(conn)
+            ensure_dedupe_index(conn)
             st.success("Saved.")
             st.rerun()
 
-    # ---- NOTES
-    st.subheader("Notes")
-    notes_df = get_notes(conn, contact_id)
-    if notes_df.empty:
-        st.caption("No notes yet.")
-    else:
-        for r in notes_df.itertuples(index=False):
-            ts = _safe_str(r.ts)[:19].replace("T", " ")
-            body = _safe_str(r.body)
-            nxt = _safe_str(getattr(r, "next_followup", "") or "")
-            st.markdown(f"- **{ts}** — {body}" + (f"  \n  _Next follow-up: {nxt}_" if nxt else ""))
-
-    with st.expander("Add a note", expanded=False):
-        note_body = st.text_area("Note", key=f"note_body_{contact_id}", height=90)
-        next_follow = st.text_input("Next follow-up (optional)", key=f"note_next_{contact_id}")
-        if st.button("Add note", key=f"btn_add_note_{contact_id}"):
-            nb = sanitize_note_text(note_body, trim_email_threads=False, max_len=4000)
-            if not nb:
-                st.warning("Note is empty.")
-            else:
-                conn.execute(
-                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (int(contact_id), datetime.utcnow().isoformat(), nb, next_follow.strip() or None),
-                )
-                conn.commit()
-                backup_contacts(conn)
-                st.success("Note added.")
-                st.rerun()
-
-    # ---- SALES
-    st.subheader("Sales (torches sold)")
-    sales_df = get_sales_for_contact(conn, contact_id)
-    if sales_df.empty:
-        st.caption("No sales recorded for this contact.")
-    else:
-        show_df = sales_df.copy()
-        show_df["unit_price_usd"] = show_df["unit_price_cents"].apply(lambda x: int(x)/100.0 if pd.notna(x) else 0.0)
-        show_df["line_total_usd"] = show_df.apply(lambda r: (int(r["qty"]) * (int(r["unit_price_cents"])/100.0)), axis=1)
-        st.dataframe(
-            show_df[["id", "sold_at", "product", "qty", "unit_price_usd", "line_total_usd", "note"]],
-            use_container_width=True,
-            hide_index=True,
-        )
-        # delete select
-        del_ids = show_df["id"].astype(int).tolist()
-        del_choice = st.selectbox("Delete a sale line (id)", [""] + del_ids, key=f"del_sale_{contact_id}")
-        if del_choice != "" and st.button("Delete selected sale line", key=f"btn_del_sale_{contact_id}"):
-            delete_sale_line(conn, int(del_choice))
-            st.success("Deleted.")
+    with csave2:
+        if st.button("🗑️ Delete contact", key=f"del_{contact_id}"):
+            conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
+            conn.commit()
+            backup_contacts(conn)
+            st.warning("Deleted.")
             st.rerun()
 
-    with st.expander("Add sale line", expanded=False):
-        csa1, csa2, csa3, csa4 = st.columns([1, 1, 1, 2])
-        with csa1:
-            sold_at = st.date_input("Sold date", value=datetime.utcnow().date(), key=f"sold_at_{contact_id}")
-        with csa2:
-            product = st.selectbox("Product", PRODUCTS, key=f"sold_prod_{contact_id}")
-        with csa3:
-            qty = st.number_input("Qty", min_value=1, value=1, step=1, key=f"sold_qty_{contact_id}")
-        with csa4:
-            price = st.text_input("Unit price (USD)", value="0", key=f"sold_price_{contact_id}")
-        note = st.text_input("Sale note (optional)", key=f"sold_note_{contact_id}")
+    # Notes
+    st.markdown("#### 📝 Notes")
+    notes_df = get_notes(conn, contact_id)
+    if not notes_df.empty:
+        for r in notes_df.itertuples(index=False):
+            ts = (str(r.ts) or "")[:19]
+            body = str(r.body or "")
+            nf = str(r.next_followup or "")
+            st.markdown(f"- **{ts}** — {body}" + (f" _(follow-up: {nf})_" if nf else ""))
 
-        if st.button("Add sale", key=f"btn_add_sale_{contact_id}"):
-            try:
-                add_sale_line(conn, contact_id, sold_at, product, int(qty), float(str(price).replace(",", "")), note)
-                st.success("Sale added.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Could not add sale: {e}")
+    new_note = st.text_area("Add note", key=f"new_note_{contact_id}")
+    next_followup = st.text_input("Next follow-up (optional)", key=f"nf_{contact_id}", value="")
+    if st.button("➕ Add note", key=f"add_note_{contact_id}"):
+        body = sanitize_note_text(new_note, trim_email_threads=False)
+        if body:
+            ts_iso = datetime.utcnow().isoformat()
+            conn.execute(
+                "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                (contact_id, ts_iso, body, next_followup.strip() or None),
+            )
+            conn.commit()
+            backup_contacts(conn)
+            st.success("Note added.")
+            st.rerun()
+        else:
+            st.info("Empty note ignored.")
 
-
-# -------------------------------------------------------------
-# EXPORT BUILDER (dtype-safe; fixes your crash)
-# -------------------------------------------------------------
-def build_export_df(conn: sqlite3.Connection, filtered_contacts_df: pd.DataFrame) -> pd.DataFrame:
-    if filtered_contacts_df is None or filtered_contacts_df.empty:
-        return pd.DataFrame()
-
-    base_cols = [
-        "id",
-        "scan_datetime",
-        "first_name",
-        "last_name",
-        "job_title",
-        "company",
-        "street",
-        "street2",
-        "zip_code",
-        "city",
-        "state",
-        "country",
-        "phone",
-        "email",
-        "website",
-        "category",
-        "status",
-        "owner",
-        "last_touch",
-        "gender",
-        "application",
-        "product_interest",
-        "photo",
-        "profile_url",
-    ]
-    available_cols = [c for c in base_cols if c in filtered_contacts_df.columns]
-    export_internal = filtered_contacts_df[available_cols].copy()
-
-    # notes agg
-    notes_agg = get_notes_agg(conn)
-    if not notes_agg.empty:
-        export_internal = export_internal.merge(notes_agg, how="left", left_on="id", right_on="contact_id")
-        export_internal.drop(columns=["contact_id"], inplace=True, errors="ignore")
+    # Sales
+    st.markdown("#### 💰 Sales")
+    sales_df = get_sales_for_contact(conn, contact_id)
+    if not sales_df.empty:
+        sales_show = sales_df.copy()
+        sales_show["qty"] = safe_int_series(sales_show["qty"], 0)
+        sales_show["unit_price_cents"] = safe_int_series(sales_show["unit_price_cents"], 0)
+        sales_show["unit_price_usd"] = sales_show["unit_price_cents"] / 100.0
+        st.dataframe(sales_show.drop(columns=["unit_price_cents"]), use_container_width=True)
     else:
-        export_internal["notes"] = ""
+        st.caption("No sales for this contact yet.")
 
-    # sales agg
-    sales_agg = get_sales_agg(conn)
-    if not sales_agg.empty:
-        export_internal = export_internal.merge(sales_agg, how="left", left_on="id", right_on="contact_id")
-        export_internal.drop(columns=["contact_id"], inplace=True, errors="ignore")
+    sc1, sc2, sc3, sc4 = st.columns([1.2, 1, 1, 2])
+    with sc1:
+        sold_at = st.date_input("Sold at", value=datetime.utcnow().date(), key=f"sold_at_{contact_id}")
+    with sc2:
+        product = st.selectbox("Product", PRODUCTS, index=0, key=f"prod_{contact_id}")
+    with sc3:
+        qty = st.number_input("Qty", min_value=1, max_value=1000, value=1, step=1, key=f"qty_{contact_id}")
+    with sc4:
+        unit_price = st.number_input("Unit price (USD)", min_value=0.0, value=0.0, step=1000.0, key=f"price_{contact_id}")
 
-    # ensure columns exist
-    for c in ["sold_qty", "sold_revenue_usd", "first_sold_at", "last_sold_at", "sales_lines"]:
-        if c not in export_internal.columns:
-            export_internal[c] = None
+    sale_note = st.text_input("Sale note (optional)", key=f"sale_note_{contact_id}", value="")
+    if st.button("➕ Add sale line", key=f"add_sale_{contact_id}"):
+        try:
+            add_sale_line(conn, contact_id, sold_at, product, int(qty), float(unit_price), sale_note)
+            st.success("Sale added.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not add sale: {e}")
 
-    # ✅ dtype-safe coercion (THIS is your crash fix)
-    export_internal["sold_qty"] = (
-        pd.to_numeric(export_internal["sold_qty"], errors="coerce")
-        .fillna(0)
-        .astype("int64")
-    )
-    export_internal["sold_revenue_usd"] = (
-        pd.to_numeric(export_internal["sold_revenue_usd"], errors="coerce")
-        .fillna(0.0)
-    )
-    export_internal["first_sold_at"] = export_internal["first_sold_at"].fillna("").astype(str)
-    export_internal["last_sold_at"] = export_internal["last_sold_at"].fillna("").astype(str)
-    export_internal["sales_lines"] = export_internal["sales_lines"].fillna("").astype(str)
-    export_internal["notes"] = export_internal["notes"].fillna("").astype(str)
-
-    export_df = export_internal.drop(columns=["id"], errors="ignore")
-    return export_df
-
+    if not sales_df.empty:
+        sale_ids = sales_df["id"].tolist()
+        del_id = st.selectbox("Delete sale line id", sale_ids, key=f"del_sale_pick_{contact_id}")
+        if st.button("Delete selected sale line", key=f"del_sale_btn_{contact_id}"):
+            delete_sale_line(conn, int(del_id))
+            st.warning("Sale line deleted.")
+            st.rerun()
 
 # -------------------------------------------------------------
-# MAIN UI
+# DASHBOARD
+# -------------------------------------------------------------
+def dashboard(conn: sqlite3.Connection):
+    st.subheader("Dashboard")
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1.2])
+    with c1:
+        show_sales_counters(conn)
+
+    stats = get_conversion_stats(conn)
+    with c2:
+        st.metric("Contacted leads", stats["contacted_count"])
+    with c3:
+        st.metric("Won leads", stats["won_count"])
+    with c4:
+        st.metric("Contacted → Won", f"{stats['conversion_rate']*100:.1f}%")
+
+    if stats["avg_days_contacted_to_win"] is not None:
+        st.caption(f"Avg speed (first Contacted → first Win/Sale): **{stats['avg_days_contacted_to_win']:.1f} days** (n={stats['speed_n']})")
+    else:
+        st.caption("Speed metric: not enough status-history data yet (needs Contacted timestamps).")
+
+# -------------------------------------------------------------
+# EXPORT BUILD (includes notes + sales)
+# -------------------------------------------------------------
+def build_export_df(conn: sqlite3.Connection, base_df: pd.DataFrame) -> pd.DataFrame:
+    if base_df.empty:
+        return base_df
+
+    notes = get_notes_agg(conn)
+    sales = get_sales_agg(conn)
+
+    out = base_df.copy()
+    out["id"] = safe_int_series(out["id"], 0)
+
+    if not notes.empty:
+        notes["contact_id"] = safe_int_series(notes["contact_id"], 0)
+        out = out.merge(notes, left_on="id", right_on="contact_id", how="left").drop(columns=["contact_id"])
+    else:
+        out["notes"] = ""
+
+    if not sales.empty:
+        sales["contact_id"] = safe_int_series(sales["contact_id"], 0)
+        out = out.merge(sales, left_on="id", right_on="contact_id", how="left").drop(columns=["contact_id"])
+    else:
+        out["sold_qty"] = 0
+        out["sold_revenue_cents"] = 0
+        out["sold_revenue_usd"] = 0.0
+        out["first_sold_at"] = ""
+        out["last_sold_at"] = ""
+        out["sales_lines"] = ""
+
+    out["sold_qty"] = safe_int_series(out.get("sold_qty", pd.Series([0]*len(out))), 0)
+    out["sold_revenue_cents"] = safe_int_series(out.get("sold_revenue_cents", pd.Series([0]*len(out))), 0)
+    out["sold_revenue_usd"] = safe_float_series(out.get("sold_revenue_usd", pd.Series([0.0]*len(out))), 0.0)
+
+    out = out.fillna("")
+    return out
+
+# -------------------------------------------------------------
+# MAIN
 # -------------------------------------------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -2027,68 +1741,51 @@ def main():
     restore_from_backup_if_empty(conn)
     ensure_dedupe_index(conn)
 
-    # auth
     check_login_two_factor_telegram()
 
-    # sidebar import/export
+    st.title(APP_TITLE)
+
     sidebar_import_export(conn)
 
-    # title row
-    top_l, top_r = st.columns([3, 1])
-    with top_l:
-        st.title(APP_TITLE)
-        st.caption("Radom leads + notes + sales (torches).")
-    with top_r:
-        show_sales_counters(conn)
+    tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📋 Contacts", "🔥 Overview"])
 
-    # conversion stats
-    with st.expander("📈 CRM conversion stats", expanded=False):
-        stats = get_conversion_stats(conn)
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("Contacted leads", stats["contacted_count"])
-        with c2:
-            st.metric("Won leads", stats["won_count"])
-        with c3:
-            st.metric("Conversion rate", f"{stats['conversion_rate']*100:.1f}%")
-        with c4:
-            if stats["avg_days_contacted_to_win"] is None:
-                st.metric("Avg days Contacted → Win", "—")
-            else:
-                st.metric("Avg days Contacted → Win", f"{stats['avg_days_contacted_to_win']:.1f} ({stats['speed_n']} samples)")
+    with tab1:
+        dashboard(conn)
 
-    # overview
-    show_priority_lists(conn)
+    with tab3:
+        show_priority_lists(conn)
 
-    # filters
-    q, cats, stats_filter, st_like, app_filter, prod_filter = filters_ui()
+    with tab2:
+        q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
+        df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
-    # fetch filtered contacts
-    df = query_contacts(conn, q, cats, stats_filter, st_like, app_filter, prod_filter)
-    if df.empty:
-        st.info("No contacts match your filters.")
-        st.session_state["export_df"] = pd.DataFrame()
-        return
+        st.caption(f"Filtered results: **{len(df)}**")
 
-    # build export df for sidebar download
-    st.session_state["export_df"] = build_export_df(conn, df)
+        export_df = build_export_df(conn, df)
+        st.session_state["export_df"] = export_df
 
-    # list view
-    st.subheader("Leads list")
-    view_cols = ["id", "first_name", "last_name", "company", "email", "status", "owner", "application", "product_interest", "country", "last_note_ts"]
-    view_cols = [c for c in view_cols if c in df.columns]
-    st.dataframe(df[view_cols].sort_values(by=["status", "company"], na_position="last"), use_container_width=True, hide_index=True)
+        if df.empty:
+            st.info("No contacts match filters.")
+            return
 
-    # select contact
-    st.markdown("### Open a lead")
-    options = {
-        int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {(r.company or '')} [{(r.status or 'New')}]"
-        for r in df.itertuples(index=False)
-    }
-    selected = st.selectbox("Select contact", list(options.keys()), format_func=lambda cid: options.get(cid, str(cid)))
-    selected_row = df[df["id"] == int(selected)].iloc[0]
-    contact_editor(conn, selected_row)
+        view = df.copy()
+        view["id"] = safe_int_series(view["id"], 0)
+        for c in ["first_name", "last_name", "company", "email", "status", "owner", "application", "product_interest", "last_note_ts"]:
+            if c not in view.columns:
+                view[c] = ""
+        view = view[["id", "first_name", "last_name", "company", "email", "status", "owner", "application", "product_interest", "last_note_ts"]]
+        view = view.fillna("")
 
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+        options = {
+            int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {r.company or ''} ({r.email or ''})"
+            for r in df.itertuples(index=False)
+        }
+        picked = st.selectbox("Select contact to edit", list(options.keys()), format_func=lambda cid: options.get(cid, str(cid)))
+
+        row = df[df["id"] == picked].iloc[0]
+        contact_editor(conn, row)
 
 if __name__ == "__main__":
     main()
