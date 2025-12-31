@@ -2060,6 +2060,40 @@ def revenue_histogram(conn: sqlite3.Connection):
     else:
         st.caption("2025 has no sales in DB yet (chart shows 0 unless you add sales lines).")
 
+def show_dashboard_strip(conn: sqlite3.Connection):
+    # Wrapper so older/newer code doesn't break.
+    # If show_sales_counters exists, use it.
+    if "show_sales_counters" in globals():
+        show_sales_counters(conn)
+    else:
+        st.info("Sales counters are not available (missing show_sales_counters).")
+
+
+def dashboard(conn: sqlite3.Connection):
+    st.subheader("Dashboard")
+
+    c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1.2])
+    with c1:
+        show_dashboard_strip(conn)
+
+    stats = get_conversion_stats(conn)
+    with c2:
+        st.metric("Contacted leads", stats.get("contacted_count", 0))
+    with c3:
+        st.metric("Won leads", stats.get("won_count", 0))
+    with c4:
+        conv = float(stats.get("conversion_rate", 0.0) or 0.0)
+        st.metric("Contacted → Won", f"{conv * 100:.1f}%")
+
+    avg_days = stats.get("avg_days_contacted_to_win")
+    speed_n = stats.get("speed_n", 0)
+    if avg_days is not None:
+        st.caption(f"Avg speed (first Contacted → first Win/Sale): **{avg_days:.1f} days** (n={speed_n})")
+    else:
+        st.caption("Speed metric: not enough status-history data yet (needs Contacted timestamps).")
+
+    st.markdown("---")
+    revenue_histogram(conn)
 
 # -------------------------------------------------------------
 # MAIN
@@ -2128,4 +2162,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
