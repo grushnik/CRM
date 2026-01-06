@@ -1,5 +1,3 @@
-```python
-# app.py — Radom CRM (final, with fixes requested)
 import os
 import re
 import sqlite3
@@ -2437,3 +2435,4 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
