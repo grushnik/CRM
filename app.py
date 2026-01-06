@@ -1,3 +1,5 @@
+```python
+# app.py — Radom CRM (final, with fixes requested)
 import os
 import re
 import sqlite3
@@ -642,9 +644,10 @@ def check_login_two_factor_telegram():
             st.rerun()
 
     with st.sidebar.expander("Troubleshooting"):
+        # ✅ SECURITY FIX: never display OTP code in UI (no fallback code)
         if not ss.get("otp_delivery_ok", False):
             st.write(ss.get("otp_delivery_msg") or "Telegram delivery failed.")
-            st.warning(f"Fallback one-time code (use only if needed): **{ss.get('otp_code','')}**")
+            st.info("No fallback code is shown for security. Please fix Telegram delivery and try again.")
 
         st.write("**Bot health check**")
         if st.button("Test getMe"):
@@ -800,7 +803,6 @@ COLMAP = {
     "profile url": "profile_url",
     "profile link": "profile_url",
     "profile_url": "profile_url",
-
     # If you import from an exported CSV that includes sales aggregates
     "sold_qty": "sold_qty",
     "sold_revenue_cents": "sold_revenue_cents",
@@ -1076,7 +1078,6 @@ def _extract_sales_rows_from_import(r: pd.Series) -> List[Dict[str, Any]]:
         if not sold_at:
             sold_at = datetime.utcnow().date().isoformat()
 
-        # best-guess product if not specified
         product = (str(r.get("product_interest") or "").strip() or "1 kW")
         unit_price_cents = int(round(rev_cents / max(1, sold_qty)))
 
@@ -1104,7 +1105,6 @@ def _upsert_sales_rows(conn: sqlite3.Connection, contact_id: int, sales_rows: Li
         unit_price_cents = int(sr.get("unit_price_cents") or 0)
         note = (sr.get("note") or "").strip() or None
 
-        # Avoid duplicates
         exists = cur.execute(
             """
             SELECT 1 FROM sales
@@ -1289,7 +1289,6 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                         (contact_id, ts_iso, note_text, None),
                     )
 
-            # ✅ IMPORTANT: import sales (if present in the uploaded CSV/export)
             sales_rows = _extract_sales_rows_from_import(r)
             if sales_rows:
                 _upsert_sales_rows(conn, int(contact_id), sales_rows)
@@ -1396,6 +1395,91 @@ def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status:
     cur.execute("UPDATE contacts SET status=?, last_touch=? WHERE id=?", (new_status, ts_iso, contact_id))
     conn.commit()
     backup_contacts(conn)
+
+
+# -------------------------------------------------------------
+# MANUAL CREATE CONTACT (NEW)  ✅
+# -------------------------------------------------------------
+def create_contact(conn: sqlite3.Connection, data: Dict[str, Any]) -> int:
+    """
+    Create a new contact record. Returns new contact_id.
+    If the contact already exists (by email/profile/dedupe_key), returns existing id.
+    """
+    first = (data.get("first_name") or "").strip() or None
+    last = (data.get("last_name") or "").strip() or None
+    company = (data.get("company") or "").strip() or None
+    email = _norm_email(data.get("email")) or None
+    profile_url = _clean_url(data.get("profile_url") or "") or None
+
+    job = (data.get("job_title") or "").strip() or None
+    phone = (data.get("phone") or "").strip() or None
+    website = _clean_url(data.get("website") or "") or None
+    owner = (data.get("owner") or "").strip() or None
+    status = (data.get("status") or "New").strip() or "New"
+    gender = (data.get("gender") or "").strip() or None
+    application = normalize_application(data.get("application")) if (data.get("application") or "").strip() else None
+    product_interest = (data.get("product_interest") or "").strip() or None
+
+    street = (data.get("street") or "").strip() or None
+    street2 = (data.get("street2") or "").strip() or None
+    zipc = (data.get("zip_code") or "").strip() or None
+    city = (data.get("city") or "").strip() or None
+    state = (data.get("state") or "").strip() or None
+    country = (data.get("country") or "").strip() or None
+
+    scan_dt = datetime.utcnow().isoformat()
+    dedupe_key = compute_dedupe_key(first, last, company, email, profile_url) or None
+
+    # prevent accidental duplicates on create
+    cur = conn.cursor()
+    existing_id = _find_existing_contact_id(cur, dedupe_key or "", email, profile_url)
+    if existing_id:
+        return int(existing_id)
+
+    tmp = pd.Series({"job_title": job or "", "email": email or ""})
+    category = infer_category(tmp)
+
+    cur.execute(
+        """
+        INSERT INTO contacts (
+          scan_datetime, first_name, last_name, job_title, company,
+          street, street2, zip_code, city, state, country,
+          phone, email, website, category, status, owner, last_touch,
+          gender, application, product_interest, photo, profile_url, dedupe_key
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            scan_dt,
+            first,
+            last,
+            job,
+            company,
+            street,
+            street2,
+            zipc,
+            city,
+            state,
+            country,
+            phone,
+            email,
+            website,
+            category or "Other",
+            status,
+            owner,
+            scan_dt,  # last_touch on creation
+            gender,
+            application,
+            product_interest,
+            None,  # photo
+            profile_url,
+            dedupe_key,
+        ),
+    )
+    new_id = int(cur.lastrowid)
+    conn.commit()
+    backup_contacts(conn)
+    ensure_dedupe_index(conn)
+    return new_id
 
 
 # -------------------------------------------------------------
@@ -1773,8 +1857,6 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
 
 def show_priority_lists(conn: sqlite3.Connection):
     st.subheader("Customer overview")
-
-    # dashboard strip ON TOP of overview
     show_dashboard_strip(conn)
     st.markdown("---")
 
@@ -1844,17 +1926,25 @@ def show_priority_lists(conn: sqlite3.Connection):
 
 
 # -------------------------------------------------------------
-# SIDEBAR IMPORT / EXPORT + DEDUPE BUTTON
+# SIDEBAR IMPORT / EXPORT + SAFE DEDUPE
 # -------------------------------------------------------------
 def sidebar_import_export(conn: sqlite3.Connection):
     st.sidebar.header("Import / Export")
 
-    if st.sidebar.button("🧹 Deduplicate database now"):
-        removed = dedupe_database(conn)
-        st.sidebar.success(f"Removed {removed} duplicate contacts")
-        st.rerun()
+    # ✅ SAFETY FIX: make dedupe hard to click by mistake (typed confirmation)
+    st.sidebar.subheader("Danger zone")
+    with st.sidebar.expander("🧹 Deduplicate database", expanded=False):
+        st.warning("This will DELETE duplicate contacts (keeps the oldest record). Use with caution.")
+        confirm = st.checkbox("I understand duplicates will be removed", value=False, key="dedupe_confirm")
+        typed = st.text_input("Type DEDUPE to confirm", value="", key="dedupe_typed")
 
-    up = st.sidebar.file_uploader("Upload Excel/CSV (Contacts)", type=["xlsx", "xls", "csv"])
+        if st.button("Run dedupe", disabled=(not confirm or typed.strip().upper() != "DEDUPE"), key="dedupe_btn"):
+            removed = dedupe_database(conn)
+            st.success(f"Removed {removed} duplicate contacts")
+            st.rerun()
+
+    # ✅ UI wording fix (can't rename OS button, but label reads like “Excel file”)
+    up = st.sidebar.file_uploader("📄 Select Excel/CSV file (Contacts)", type=["xlsx", "xls", "csv"])
     if up is not None:
         df = load_contacts_file(up)
         n = upsert_contacts(conn, df)
@@ -2150,7 +2240,6 @@ def revenue_histogram(conn: sqlite3.Connection):
     yearly = get_sales_yearly_totals(conn)
     actual = {int(r.year): float(r.revenue_usd) for r in yearly.itertuples(index=False)} if not yearly.empty else {}
 
-    # projections (only used when a year has NO real sales yet)
     projections = {
         2026: 200000.0,
         2027: 400000.0,
@@ -2162,19 +2251,13 @@ def revenue_histogram(conn: sqlite3.Connection):
     rows = []
     for y in years:
         if y in actual:
-            val = float(actual[y])  # real sales always win, even if small
+            val = float(actual[y])
             is_projected = False
         else:
             val = float(projections.get(y, 0.0))
             is_projected = (y in projections)
 
-        rows.append(
-            {
-                "Year": str(y) + (" (proj)" if is_projected else ""),
-                "Revenue": float(val),
-                "_year_num": int(y),
-            }
-        )
+        rows.append({"Year": str(y) + (" (proj)" if is_projected else ""), "Revenue": float(val), "_year_num": int(y)})
 
     chart_df = pd.DataFrame(rows).sort_values("_year_num")[["Year", "Revenue"]].reset_index(drop=True)
     st.bar_chart(chart_df, x="Year", y="Revenue")
@@ -2216,6 +2299,80 @@ def main():
         show_priority_lists(conn)
 
     with tab_contacts:
+        # ✅ Manual form restored (inside Contacts tab)
+        with st.expander("➕ Add lead manually", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                nf = st.text_input("First name", key="new_first_name")
+                nl = st.text_input("Last name", key="new_last_name")
+                nj = st.text_input("Job title", key="new_job_title")
+            with c2:
+                nco = st.text_input("Company", key="new_company")
+                nem = st.text_input("Email", key="new_email")
+                nph = st.text_input("Phone", key="new_phone")
+            with c3:
+                nwb = st.text_input("Website", key="new_website")
+                nli = st.text_input("LinkedIn/Profile URL", key="new_profile_url")
+                now = st.selectbox("Owner", OWNERS, index=0, key="new_owner")
+
+            c4, c5, c6 = st.columns(3)
+            with c4:
+                nst = st.selectbox("Status", PIPELINE, index=PIPELINE.index("New"), key="new_status")
+                nge = st.text_input("Gender", key="new_gender")
+            with c5:
+                nap = st.selectbox("Application", [""] + APPLICATIONS, index=0, key="new_application")
+                npi = st.selectbox("Product interest", [""] + PRODUCTS, index=0, key="new_product_interest")
+            with c6:
+                nct = st.text_input("Country", key="new_country")
+                nstate = st.text_input("State/Province", key="new_state")
+                ncity = st.text_input("City", key="new_city")
+
+            na1 = st.text_input("Street", key="new_street")
+            na2 = st.text_input("Street 2", key="new_street2")
+            nzp = st.text_input("Zip", key="new_zip_code")
+
+            note = st.text_area("Initial note (optional)", key="new_note_body")
+            next_fu = st.text_input("Next follow-up (optional)", key="new_next_followup")
+
+            if st.button("Create lead", use_container_width=True, key="create_lead_btn"):
+                new_id = create_contact(
+                    conn,
+                    {
+                        "first_name": nf,
+                        "last_name": nl,
+                        "job_title": nj,
+                        "company": nco,
+                        "email": nem,
+                        "phone": nph,
+                        "website": nwb,
+                        "profile_url": nli,
+                        "owner": now,
+                        "status": nst,
+                        "gender": nge,
+                        "application": nap,
+                        "product_interest": npi,
+                        "country": nct,
+                        "state": nstate,
+                        "city": ncity,
+                        "street": na1,
+                        "street2": na2,
+                        "zip_code": nzp,
+                    },
+                )
+
+                body = sanitize_note_text(note, trim_email_threads=False)
+                if body:
+                    ts_iso = datetime.utcnow().isoformat()
+                    conn.execute(
+                        "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                        (int(new_id), ts_iso, body, next_fu.strip() or None),
+                    )
+                    conn.commit()
+                    backup_contacts(conn)
+
+                st.success(f"Lead saved (id={new_id}).")
+                st.rerun()
+
         q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
         df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
@@ -2279,3 +2436,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
