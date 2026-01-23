@@ -249,47 +249,22 @@ def init_db(conn: sqlite3.Connection):
 # 🎄 CHRISTMAS BACKGROUND (SAFE FOR STREAMLIT CLOUD)
 # -------------------------------------------------------------
 def inject_christmas_background():
-    import base64
-
-    svg = """
-    <svg xmlns="http://www.w3.org/2000/svg" width="260" height="260">
-      <rect width="260" height="260" fill="none"/>
-      <g stroke="rgba(140,80,255,0.35)" stroke-width="2">
-        <path d="M40 50 l10 10 M50 50 l-10 10 M45 42 v16 M37 50 h16"/>
-        <path d="M200 70 l10 10 M210 70 l-10 10 M205 62 v16 M197 70 h16"/>
-        <path d="M120 190 l10 10 M130 190 l-10 10 M125 182 v16 M117 190 h16"/>
-        <path d="M70 160 l8 8 M78 160 l-8 8 M74 154 v12 M68 160 h12"/>
-        <path d="M190 170 l8 8 M198 170 l-8 8 M194 164 v12 M188 170 h12"/>
-      </g>
-      <g fill="rgba(140,80,255,0.18)">
-        <circle cx="95" cy="35" r="2"/>
-        <circle cx="160" cy="120" r="2"/>
-        <circle cx="30" cy="210" r="2"/>
-        <circle cx="235" cy="220" r="2"/>
-        <circle cx="220" cy="25" r="2"/>
-      </g>
-    </svg>
-    """.strip()
-
-    b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
-    bg_url = f"data:image/svg+xml;base64,{b64}"
-
+    """Keeps the clean white background and transparent Streamlit chrome.
+    (Removed the decorative tiled star/snow pattern.)"""
     st.markdown(
-        f"""
+        """
         <style>
-        [data-testid="stAppViewContainer"] {{
-            background-image: url("{bg_url}");
-            background-repeat: repeat;
-            background-size: 260px 260px;
-            background-attachment: fixed;
+        [data-testid="stAppViewContainer"] {
+            background-image: none !important;
             background-color: #ffffff;
-        }}
+            background-attachment: fixed;
+        }
         .stApp,
         [data-testid="stHeader"],
         [data-testid="stToolbar"],
-        [data-testid="stSidebar"] > div:first-child {{
+        [data-testid="stSidebar"] > div:first-child {
             background: transparent !important;
-        }}
+        }
         </style>
         """,
         unsafe_allow_html=True,
