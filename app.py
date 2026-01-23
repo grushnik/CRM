@@ -2207,7 +2207,7 @@ def main():
 
     tab_overview, tab_contacts, tab_dashboard = st.tabs(["🔥 Overview", "📋 Contacts", "📊 Dashboard"])
 
-    with tab_overview:
+with tab_overview:
     show_priority_lists(conn)
 
 with tab_contacts:
@@ -2298,5 +2298,6 @@ with tab_dashboard:
 
 if __name__ == "__main__":
     main()
+
 
 
