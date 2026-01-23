@@ -245,11 +245,8 @@ def init_db(conn: sqlite3.Connection):
     _backfill_unit_price_cents(conn)
 
 
+
 # -------------------------------------------------------------
-# 🎄 CHRISTMAS BACKGROUND (SAFE FOR STREAMLIT CLOUD)
-# -------------------------------------------------------------
-def inject_christmas_background():
-    import base64
 
     svg = """
     <svg xmlns="http://www.w3.org/2000/svg" width="260" height="260">
@@ -2197,8 +2194,6 @@ def dashboard(conn: sqlite3.Connection):
 # -------------------------------------------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    inject_christmas_background()
-
     conn = get_conn()
     init_db(conn)
     restore_from_backup_if_empty(conn)
@@ -2216,6 +2211,77 @@ def main():
         show_priority_lists(conn)
 
     with tab_contacts:
+
+    # ✅ Manual form: create new lead
+    with st.expander("➕ Add lead manually", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            nf = st.text_input("First name", key="new_first_name")
+            nl = st.text_input("Last name", key="new_last_name")
+            nj = st.text_input("Job title", key="new_job_title")
+        with c2:
+            nco = st.text_input("Company", key="new_company")
+            nem = st.text_input("Email", key="new_email")
+            nph = st.text_input("Phone", key="new_phone")
+        with c3:
+            nwb = st.text_input("Website", key="new_website")
+            nli = st.text_input("LinkedIn/Profile URL", key="new_profile_url")
+            now = st.selectbox("Owner", OWNERS, index=0, key="new_owner")
+
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            nst = st.selectbox("Status", PIPELINE, index=PIPELINE.index("New"), key="new_status")
+            nge = st.text_input("Gender", key="new_gender")
+        with c5:
+            nap = st.selectbox("Application", [""] + APPLICATIONS, index=0, key="new_application")
+            npi = st.selectbox("Product interest", [""] + PRODUCTS, index=0, key="new_product_interest")
+        with c6:
+            nct = st.text_input("Country", key="new_country")
+            nstate = st.text_input("State/Province", key="new_state")
+            ncity = st.text_input("City", key="new_city")
+            na1 = st.text_input("Street", key="new_street")
+            na2 = st.text_input("Street 2", key="new_street2")
+            nzp = st.text_input("Zip", key="new_zip_code")
+
+        note = st.text_area("Initial note (optional)", key="new_note_body")
+        next_fu = st.text_input("Next follow-up (optional)", key="new_next_followup")
+
+        if st.button("Create lead", use_container_width=True, key="create_lead_btn"):
+            new_id = create_contact(
+                conn,
+                {
+                    "first_name": nf,
+                    "last_name": nl,
+                    "job_title": nj,
+                    "company": nco,
+                    "email": nem,
+                    "phone": nph,
+                    "website": nwb,
+                    "profile_url": nli,
+                    "owner": now,
+                    "status": nst,
+                    "gender": nge,
+                    "application": nap,
+                    "product_interest": npi,
+                    "country": nct,
+                    "state": nstate,
+                    "city": ncity,
+                    "street": na1,
+                    "street2": na2,
+                    "zip_code": nzp,
+                },
+            )
+            body = sanitize_note_text(note, trim_email_threads=False)
+            if body:
+                ts_iso = datetime.utcnow().isoformat()
+                conn.execute(
+                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                    (int(new_id), ts_iso, body, next_fu.strip() or None),
+                )
+                conn.commit()
+                backup_contacts(conn)
+            st.success(f"Lead saved (id={new_id}).")
+            st.rerun()
         q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
         df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
