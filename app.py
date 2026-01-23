@@ -245,8 +245,11 @@ def init_db(conn: sqlite3.Connection):
     _backfill_unit_price_cents(conn)
 
 
-
 # -------------------------------------------------------------
+# 🎄 CHRISTMAS BACKGROUND (SAFE FOR STREAMLIT CLOUD)
+# -------------------------------------------------------------
+def inject_christmas_background():
+    import base64
 
     svg = """
     <svg xmlns="http://www.w3.org/2000/svg" width="260" height="260">
@@ -1306,6 +1309,151 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     return n
 
 
+
+# -------------------------------------------------------------
+# MANUAL CREATE (single lead)
+# -------------------------------------------------------------
+def create_contact(conn: sqlite3.Connection, data: Dict[str, Any]) -> int:
+    """
+    Create a single contact from a dict of fields (UI manual entry).
+    Returns new contact id.
+    """
+    first = (data.get("first_name") or "").strip() or None
+    last = (data.get("last_name") or "").strip() or None
+    job = (data.get("job_title") or "").strip() or None
+    company = (data.get("company") or "").strip() or None
+    email = _norm_email(data.get("email")) or None
+    phone = str(data.get("phone") or "").strip() or None
+    website = _clean_url(data.get("website") or "") or None
+    profile_url = _clean_url(data.get("profile_url") or "") or None
+    owner = (data.get("owner") or "").strip() or None
+    status = normalize_status(data.get("status")) or (data.get("status") or "New")
+    status = (status or "New").strip() or "New"
+    gender = (data.get("gender") or "").strip() or None
+    application = normalize_application(data.get("application"))
+    product_interest = (data.get("product_interest") or "").strip() or None
+    country = (data.get("country") or "").strip() or None
+    state = (data.get("state") or "").strip() or None
+    city = (data.get("city") or "").strip() or None
+    street = (data.get("street") or "").strip() or None
+    street2 = (data.get("street2") or "").strip() or None
+    zipc = (data.get("zip_code") or "").strip() or None
+
+    dedupe_key = compute_dedupe_key(first, last, company, email, profile_url) or None
+    scan_dt = datetime.utcnow().isoformat()
+
+    # category inference expects a Series-like row
+    category = infer_category(pd.Series({"job_title": job or "", "email": email or ""})) or "Other"
+
+    cur = conn.cursor()
+    existing_id = None
+    try:
+        existing_id = _find_existing_contact_id(cur, dedupe_key or "", email, profile_url)
+    except Exception:
+        existing_id = None
+
+    if existing_id:
+        # behave like an update, but keep id stable
+        cur.execute(
+            """
+            UPDATE contacts SET
+              scan_datetime=?,
+              first_name=?,
+              last_name=?,
+              job_title=?,
+              company=?,
+              street=?,
+              street2=?,
+              zip_code=?,
+              city=?,
+              state=?,
+              country=?,
+              phone=?,
+              email=?,
+              website=?,
+              category=?,
+              status=?,
+              owner=?,
+              last_touch=?,
+              gender=?,
+              application=?,
+              product_interest=?,
+              profile_url=?,
+              dedupe_key=?
+            WHERE id=?
+            """,
+            (
+                scan_dt,
+                first,
+                last,
+                job,
+                company,
+                street,
+                street2,
+                zipc,
+                city,
+                state,
+                country,
+                phone,
+                email,
+                website,
+                category,
+                status,
+                owner,
+                scan_dt,
+                gender,
+                application,
+                product_interest,
+                profile_url,
+                dedupe_key,
+                int(existing_id),
+            ),
+        )
+        conn.commit()
+        return int(existing_id)
+
+    cur.execute(
+        """
+        INSERT INTO contacts (
+          scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
+          city, state, country, phone, email, website, category, status, owner, last_touch,
+          gender, application, product_interest, photo, profile_url, dedupe_key
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            scan_dt,
+            first,
+            last,
+            job,
+            company,
+            street,
+            street2,
+            zipc,
+            city,
+            state,
+            country,
+            phone,
+            email,
+            website,
+            category,
+            status,
+            owner,
+            scan_dt,
+            gender,
+            application,
+            product_interest,
+            None,
+            profile_url,
+            dedupe_key,
+        ),
+    )
+    new_id = int(cur.lastrowid)
+    conn.commit()
+    ensure_dedupe_index(conn)
+    backup_contacts(conn)
+    return new_id
+
+
 # -------------------------------------------------------------
 # QUERIES & NOTES
 # -------------------------------------------------------------
@@ -2194,6 +2342,8 @@ def dashboard(conn: sqlite3.Connection):
 # -------------------------------------------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+    inject_christmas_background()
+
     conn = get_conn()
     init_db(conn)
     restore_from_backup_if_empty(conn)
@@ -2207,97 +2357,146 @@ def main():
 
     tab_overview, tab_contacts, tab_dashboard = st.tabs(["🔥 Overview", "📋 Contacts", "📊 Dashboard"])
 
-with tab_overview:
-    show_priority_lists(conn)
+    with tab_overview:
+        show_priority_lists(conn)
 
-with tab_contacts:
-    # ✅ Manual form: create new lead
-    with st.expander("➕ Add lead manually", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            nf = st.text_input("First name", key="new_first_name")
-            nl = st.text_input("Last name", key="new_last_name")
-            nj = st.text_input("Job title", key="new_job_title")
-        with c2:
-            nco = st.text_input("Company", key="new_company")
-            nem = st.text_input("Email", key="new_email")
-            nph = st.text_input("Phone", key="new_phone")
-        with c3:
-            nwb = st.text_input("Website", key="new_website")
-            nli = st.text_input("LinkedIn/Profile URL", key="new_profile_url")
-            now = st.selectbox("Owner", OWNERS, index=0, key="new_owner")
+    with tab_contacts:
+        # ➕ Manual form: create new lead
+        with st.expander("➕ Add lead manually", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                nf = st.text_input("First name", key="new_first_name")
+                nl = st.text_input("Last name", key="new_last_name")
+                nj = st.text_input("Job title", key="new_job_title")
+            with c2:
+                nco = st.text_input("Company", key="new_company")
+                nem = st.text_input("Email", key="new_email")
+                nph = st.text_input("Phone", key="new_phone")
+            with c3:
+                nwb = st.text_input("Website", key="new_website")
+                nli = st.text_input("LinkedIn/Profile URL", key="new_profile_url")
+                now = st.selectbox("Owner", OWNERS, index=0, key="new_owner")
 
-        c4, c5, c6 = st.columns(3)
-        with c4:
-            nst = st.selectbox("Status", PIPELINE, index=PIPELINE.index("New"), key="new_status")
-            nge = st.text_input("Gender", key="new_gender")
-        with c5:
-            nap = st.selectbox("Application", [""] + APPLICATIONS, index=0, key="new_application")
-            npi = st.selectbox("Product interest", [""] + PRODUCTS, index=0, key="new_product_interest")
-        with c6:
-            nct = st.text_input("Country", key="new_country")
-            nstate = st.text_input("State/Province", key="new_state")
-            ncity = st.text_input("City", key="new_city")
+            c4, c5, c6 = st.columns(3)
+            with c4:
+                nst = st.selectbox("Status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0, key="new_status")
+                nge = st.text_input("Gender", key="new_gender")
+            with c5:
+                nap = st.selectbox("Application", [""] + APPLICATIONS, index=0, key="new_application")
+                npi = st.selectbox("Product interest", [""] + PRODUCTS, index=0, key="new_product_interest")
+            with c6:
+                nct = st.text_input("Country", key="new_country")
+                nstate = st.text_input("State/Province", key="new_state")
+                ncity = st.text_input("City", key="new_city")
+
             na1 = st.text_input("Street", key="new_street")
             na2 = st.text_input("Street 2", key="new_street2")
             nzp = st.text_input("Zip", key="new_zip_code")
 
-        note = st.text_area("Initial note (optional)", key="new_note_body")
-        next_fu = st.text_input("Next follow-up (optional)", key="new_next_followup")
+            note = st.text_area("Initial note (optional)", key="new_note_body")
+            next_fu = st.text_input("Next follow-up (optional)", key="new_next_followup")
 
-        if st.button("Create lead", use_container_width=True, key="create_lead_btn"):
-            new_id = create_contact(conn, {
-                "first_name": nf,
-                "last_name": nl,
-                "job_title": nj,
-                "company": nco,
-                "email": nem,
-                "phone": nph,
-                "website": nwb,
-                "profile_url": nli,
-                "owner": now,
-                "status": nst,
-                "gender": nge,
-                "application": nap,
-                "product_interest": npi,
-                "country": nct,
-                "state": nstate,
-                "city": ncity,
-                "street": na1,
-                "street2": na2,
-                "zip_code": nzp,
-            })
-            body = sanitize_note_text(note, trim_email_threads=False)
-            if body:
-                ts_iso = datetime.utcnow().isoformat()
-                conn.execute(
-                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (int(new_id), ts_iso, body, next_fu.strip() or None),
+            if st.button("Create lead", use_container_width=True, key="create_lead_btn"):
+                new_id = create_contact(
+                    conn,
+                    {
+                        "first_name": nf,
+                        "last_name": nl,
+                        "job_title": nj,
+                        "company": nco,
+                        "email": nem,
+                        "phone": nph,
+                        "website": nwb,
+                        "profile_url": nli,
+                        "owner": now,
+                        "status": nst,
+                        "gender": nge,
+                        "application": nap,
+                        "product_interest": npi,
+                        "country": nct,
+                        "state": nstate,
+                        "city": ncity,
+                        "street": na1,
+                        "street2": na2,
+                        "zip_code": nzp,
+                    },
                 )
-                conn.commit()
+
+                body = sanitize_note_text(note, trim_email_threads=False)
+                if body:
+                    ts_iso = datetime.utcnow().isoformat()
+                    conn.execute(
+                        "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                        (int(new_id), ts_iso, body, next_fu.strip() or None),
+                    )
+                    conn.commit()
+
                 backup_contacts(conn)
-            st.success(f"Lead saved (id={new_id}).")
-            st.rerun()
+                ensure_dedupe_index(conn)
+                st.success(f"Lead saved (id={new_id}).")
+                st.rerun()
 
-    q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
-    df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
+        q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
+        df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
-    st.caption(f"Filtered results: **{len(df)}**")
-    export_df = build_export_df(conn, df)
-    st.session_state["export_df"] = export_df
+        st.caption(f"Filtered results: **{len(df)}**")
 
-    if df.empty:
-        st.info("No contacts match filters.")
-        st.stop()  # safer than return inside tab block
+        export_df = build_export_df(conn, df)
+        st.session_state["export_df"] = export_df
 
-    # ...rest of your contacts table + editor here...
+        if df.empty:
+            st.info("No contacts match filters.")
+            return
 
-with tab_dashboard:
-    dashboard(conn)
+        view = df.copy()
+        view["id"] = safe_int_series(view["id"], 0)
+        for c in [
+            "first_name",
+            "last_name",
+            "company",
+            "email",
+            "status",
+            "owner",
+            "application",
+            "product_interest",
+            "last_note_ts",
+        ]:
+            if c not in view.columns:
+                view[c] = ""
+        view = view[
+            [
+                "id",
+                "first_name",
+                "last_name",
+                "company",
+                "email",
+                "status",
+                "owner",
+                "application",
+                "product_interest",
+                "last_note_ts",
+            ]
+        ].fillna("")
+
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+        options = {
+            int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {r.company or ''} ({r.email or ''})"
+            for r in df.itertuples(index=False)
+        }
+        picked = st.selectbox(
+            "Select contact to edit",
+            list(options.keys()),
+            format_func=lambda cid: options.get(cid, str(cid)),
+        )
+
+        row = df[df["id"] == picked].iloc[0]
+        contact_editor(conn, row)
+
+    with tab_dashboard:
+        dashboard(conn)
 
 
 if __name__ == "__main__":
     main()
-
-
 
