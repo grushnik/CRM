@@ -53,14 +53,11 @@ PIPELINE = [
     "Meeting",
     "Quoted",
     "Won",
-    "Lost",
-    "Nurture",
-    "Pending",
-    "On hold",
     "Irrelevant",
+    "On hold",
 ]
 
-OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin"]
+OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin", "Annie"]
 
 # -------------------------------------------------------------
 # dtype-safe numeric helpers
@@ -151,6 +148,7 @@ def init_db(conn: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS contacts (
           id INTEGER PRIMARY KEY,
           scan_datetime TEXT,
+          created_at TEXT,
           first_name TEXT,
           last_name TEXT,
           job_title TEXT,
@@ -168,6 +166,9 @@ def init_db(conn: sqlite3.Connection):
           status TEXT DEFAULT 'New',
           owner TEXT,
           last_touch TEXT,
+          last_communication TEXT,
+          quote_date TEXT,
+          meeting_date TEXT,
           gender TEXT,
           application TEXT,
           product_interest TEXT,
@@ -222,6 +223,10 @@ def init_db(conn: sqlite3.Connection):
             "photo": "TEXT",
             "owner": "TEXT",
             "last_touch": "TEXT",
+            "created_at": "TEXT",
+            "last_communication": "TEXT",
+            "quote_date": "TEXT",
+            "meeting_date": "TEXT",
             "website": "TEXT",
             "gender": "TEXT",
             "application": "TEXT",
@@ -248,6 +253,17 @@ def init_db(conn: sqlite3.Connection):
 # -------------------------------------------------------------
 # 🎄 CHRISTMAS BACKGROUND (SAFE FOR STREAMLIT CLOUD)
 # -------------------------------------------------------------
+    # -------------------------------------------------------------
+    # Status migration (older data -> simplified pipeline)
+    # -------------------------------------------------------------
+    try:
+        conn.execute("UPDATE contacts SET status='Irrelevant' WHERE status='Lost'")
+        conn.execute("UPDATE contacts SET status='On hold' WHERE status IN ('Nurture','Pending')")
+        conn.commit()
+    except Exception:
+        pass
+
+
 def inject_christmas_background():
     """Keeps the clean white background and transparent Streamlit chrome.
     (Removed the decorative tiled star/snow pattern.)"""
@@ -766,6 +782,16 @@ COLMAP = {
     "photo": "photo",
     "owner": "owner",
     "last_touch": "last_touch",
+    "created_at": "created_at",
+    "date added": "created_at",
+    "date_added": "created_at",
+    "added": "created_at",
+    "last communication": "last_communication",
+    "last_communication": "last_communication",
+    "quote date": "quote_date",
+    "quote_date": "quote_date",
+    "meeting date": "meeting_date",
+    "meeting_date": "meeting_date",
     "linkedin": "profile_url",
     "linkedin url": "profile_url",
     "linkedin_url": "profile_url",
@@ -787,6 +813,10 @@ COLMAP = {
 
 EXPECTED = [
     "scan_datetime",
+    "created_at",
+    "last_communication",
+    "quote_date",
+    "meeting_date",
     "first_name",
     "last_name",
     "job_title",
@@ -855,23 +885,27 @@ def normalize_status(val: Any) -> Optional[str]:
     s = str(val).strip().lower()
     if not s:
         return None
+
     for p in PIPELINE:
         if s == p.lower():
             return p
+
     synonyms = {
         "new lead": "New",
+        "new customer": "New",
         "contact": "Contacted",
+        "contacted lead": "Contacted",
         "meeting scheduled": "Meeting",
+        "scheduled meeting": "Meeting",
         "quote": "Quoted",
         "won deal": "Won",
-        "lost deal": "Lost",
-        "follow up": "Nurture",
-        "follow-up": "Nurture",
+        "closed won": "Won",
+        "irrelevant lead": "Irrelevant",
+        "hold": "On hold",
+        "onhold": "On hold",
     }
-    if s in synonyms:
-        return synonyms[s]
-    return None
-
+    v = synonyms.get(s)
+    return v if v in PIPELINE else None
 
 def normalize_application(val: Any) -> Optional[str]:
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -1115,6 +1149,12 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         note_text = sanitize_note_text(raw_note, trim_email_threads=True)
 
         scan_dt = r.get("scan_datetime") or None
+        scan_dt = parse_dt(scan_dt) if scan_dt else None
+        created_at = parse_dt(r.get("created_at")) or scan_dt or datetime.utcnow().isoformat()
+        last_communication = parse_dt(r.get("last_communication"))
+        quote_date = parse_dt(r.get("quote_date"))
+        meeting_date = parse_dt(r.get("meeting_date"))
+
         first = (r.get("first_name") or "").strip() or None
         last = (r.get("last_name") or "").strip() or None
         job = (r.get("job_title") or "").strip() or None
@@ -1142,7 +1182,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             existing_id = _find_existing_contact_id(cur, dedupe_key or "", email, profile_url)
             existing_status = None
             if existing_id:
-                row2 = cur.execute("SELECT status FROM contacts WHERE id=?", (existing_id,)).fetchone()
+                row2 = cur.execute("SELECT status, created_at, last_communication, quote_date, meeting_date FROM contacts WHERE id=?", (existing_id,)).fetchone()
                 existing_status = (row2[0] if row2 else "New") or "New"
 
             final_status = status_from_file or existing_status or "New"
@@ -1163,6 +1203,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     """
                     UPDATE contacts SET
                       scan_datetime=?,
+                      created_at=?,
                       first_name=?,
                       last_name=?,
                       job_title=?,
@@ -1180,6 +1221,9 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                       status=?,
                       owner=?,
                       last_touch=?,
+                      last_communication=?,
+                      quote_date=?,
+                      meeting_date=?,
                       gender=?,
                       application=?,
                       product_interest=?,
@@ -1190,6 +1234,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     """,
                     (
                         scan_dt,
+                        created_at,
                         first,
                         last,
                         job,
@@ -1207,6 +1252,9 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                         final_status,
                         owner,
                         last_touch,
+                        last_communication,
+                        quote_date,
+                        meeting_date,
                         gender,
                         application,
                         product_interest,
@@ -1221,13 +1269,14 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 cur.execute(
                     """
                     INSERT INTO contacts (
-                      scan_datetime, first_name, last_name, job_title, company, street, street2, zip_code,
-                      city, state, country, phone, email, website, category, status, owner, last_touch,
-                      gender, application, product_interest, photo, profile_url, dedupe_key
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                      scan_datetime, created_at, first_name, last_name, job_title, company, street, street2, zip_code,
+                      city, state, country, phone, email, website, category, status, owner, last_touch, last_communication,
+                      quote_date, meeting_date, gender, application, product_interest, photo, profile_url, dedupe_key
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         scan_dt,
+                        created_at,
                         first,
                         last,
                         job,
@@ -1245,6 +1294,9 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                         final_status,
                         owner,
                         last_touch,
+                        last_communication,
+                        quote_date,
+                        meeting_date,
                         gender,
                         application,
                         product_interest,
@@ -1263,6 +1315,9 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                         "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
                         (contact_id, ts_iso, note_text, None),
                     )
+
+                    # update last communication timestamp
+                    cur.execute("UPDATE contacts SET last_communication=? WHERE id=?", (ts_iso, contact_id))
 
             # ✅ IMPORTANT: import sales (if present in the uploaded CSV/export)
             sales_rows = _extract_sales_rows_from_import(r)
@@ -1500,27 +1555,60 @@ def get_notes_agg(conn: sqlite3.Connection) -> pd.DataFrame:
 def update_contact_status(conn: sqlite3.Connection, contact_id: int, new_status: str):
     new_status = (new_status or "New").strip()
     cur = conn.cursor()
-    cur.execute("SELECT status FROM contacts WHERE id=?", (contact_id,))
+    cur.execute("SELECT status, last_communication, quote_date, meeting_date FROM contacts WHERE id=?", (contact_id,))
     row = cur.fetchone()
     if not row:
         return
+
     old_status = (row[0] or "New").strip()
+    last_comm = (row[1] or "").strip()
+    quote_date = (row[2] or "").strip()
+    meeting_date = (row[3] or "").strip()
+
     if old_status == new_status:
         return
 
     ts_iso = datetime.utcnow().isoformat()
+
+    new_last_comm = last_comm
+    new_quote_date = quote_date
+    new_meeting_date = meeting_date
+
+    if new_status == "Contacted" and not new_last_comm:
+        new_last_comm = ts_iso
+    if new_status == "Quoted" and not new_quote_date:
+        new_quote_date = ts_iso
+    if new_status == "Meeting" and not new_meeting_date:
+        new_meeting_date = ts_iso
+
     cur.execute(
         "INSERT INTO status_history(contact_id, ts, old_status, new_status) VALUES (?,?,?,?)",
         (contact_id, ts_iso, old_status, new_status),
     )
-    cur.execute("UPDATE contacts SET status=?, last_touch=? WHERE id=?", (new_status, ts_iso, contact_id))
+
+    cur.execute(
+        """
+        UPDATE contacts
+        SET status=?,
+            last_touch=?,
+            last_communication=?,
+            quote_date=?,
+            meeting_date=?
+        WHERE id=?
+        """,
+        (
+            new_status,
+            ts_iso,
+            new_last_comm or None,
+            new_quote_date or None,
+            new_meeting_date or None,
+            contact_id,
+        ),
+    )
+
     conn.commit()
     backup_contacts(conn)
 
-
-# -------------------------------------------------------------
-# SALES HELPERS
-# -------------------------------------------------------------
 def add_sale_line(
     conn: sqlite3.Connection,
     contact_id: int,
@@ -1826,11 +1914,17 @@ def show_dashboard_strip(conn: sqlite3.Connection):
 # -------------------------------------------------------------
 # OVERVIEW LISTS (HTML)
 # -------------------------------------------------------------
-def _render_lead_list(title_html: str, df: pd.DataFrame):
+def _render_lead_list(title_html: str, df: pd.DataFrame, mode: str):
     st.markdown(title_html, unsafe_allow_html=True)
     if df.empty:
         st.caption("No leads in this group.")
         return
+
+    def fmt_date(v: Any) -> str:
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        return s[:10]
 
     rows_html = []
     for _, sub in df.iterrows():
@@ -1847,6 +1941,11 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
         product = (sub.get("product_interest") or "").strip()
         application = (sub.get("application") or "").strip()
 
+        created_at = fmt_date(sub.get("created_at") or sub.get("scan_datetime"))
+        last_comm = fmt_date(sub.get("last_communication") or sub.get("last_touch") or sub.get("last_note_ts"))
+        quote_dt = fmt_date(sub.get("quote_date"))
+        meet_dt = fmt_date(sub.get("meeting_date"))
+
         meta_bits = []
         if company:
             meta_bits.append(company)
@@ -1856,6 +1955,20 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
             meta_bits.append(f"interested in {product}")
         if application:
             meta_bits.append(f"application: {application}")
+
+        if mode == "new" and created_at:
+            meta_bits.append(f"added: {created_at}")
+        elif mode == "potential" and last_comm:
+            meta_bits.append(f"last comm: {last_comm}")
+        elif mode == "hot":
+            date_bits = []
+            if meet_dt:
+                date_bits.append(f"meeting: {meet_dt}")
+            if quote_dt:
+                date_bits.append(f"quote: {quote_dt}")
+            if date_bits:
+                meta_bits.append(" • ".join(date_bits))
+
         meta = " • ".join(meta_bits) if meta_bits else "—"
 
         if profile:
@@ -1890,7 +2003,6 @@ def _render_lead_list(title_html: str, df: pd.DataFrame):
     est_height = min(1200, 54 * len(df) + 60)
     components.html(block, height=est_height, scrolling=True)
 
-
 def show_priority_lists(conn: sqlite3.Connection):
     st.subheader("Customer overview")
 
@@ -1899,7 +2011,13 @@ def show_priority_lists(conn: sqlite3.Connection):
     st.markdown("---")
 
     df_all = pd.read_sql_query(
-        "SELECT id, first_name, last_name, company, email, status, owner, profile_url, country, product_interest, application FROM contacts",
+        """
+        SELECT id, first_name, last_name, company, email, status, owner, profile_url, country,
+               product_interest, application, scan_datetime, created_at, last_touch, last_communication,
+               quote_date, meeting_date,
+               (SELECT MAX(ts) FROM notes n WHERE n.contact_id = c.id) AS last_note_ts
+        FROM contacts c
+        """,
         conn,
     )
     if df_all.empty:
@@ -1929,43 +2047,39 @@ def show_priority_lists(conn: sqlite3.Connection):
 
     st.markdown("---")
 
-    hot_raw = df_all[df_all["status"].isin(["Quoted", "Meeting"])].copy()
-    pot_raw = df_all[df_all["status"].isin(["New", "Contacted"])].copy()
-    cold_raw = df_all[df_all["status"].isin(["Pending", "On hold", "Irrelevant"])].copy()
+    new_raw = df_all[df_all["status"].isin(["New"])].copy()
+    pot_raw = df_all[df_all["status"].isin(["Contacted"])].copy()
+    hot_raw = df_all[df_all["status"].isin(["Meeting", "Quoted"])].copy()
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        hot_header = f"""
-            <div style="background-color:#ff6b6b;padding:6px 10px;border-radius:10px;
-                        font-weight:700;color:white;text-align:center;margin-bottom:6px;">
-                🔥 Hot customers ({len(hot_raw)}) — Quoted / Meeting
-            </div>
-        """
-        _render_lead_list(hot_header, hot_raw)
-
-    with col2:
-        pot_header = f"""
+        header = f"""
             <div style="background-color:#28a745;padding:6px 10px;border-radius:10px;
                         font-weight:700;color:white;text-align:center;margin-bottom:6px;">
-                🌱 Potential customers ({len(pot_raw)}) — New / Contacted
+                🟢 New customers ({len(new_raw)}) — New
             </div>
         """
-        _render_lead_list(pot_header, pot_raw)
+        _render_lead_list(header, new_raw, mode="new")
 
-    with col3:
-        cold_header = f"""
+    with col2:
+        header = f"""
             <div style="background-color:#007bff;padding:6px 10px;border-radius:10px;
                         font-weight:700;color:white;text-align:center;margin-bottom:6px;">
-                ❄️ Cold customers ({len(cold_raw)}) — Pending / On hold / Irrelevant
+                🔵 Potential sales ({len(pot_raw)}) — Contacted
             </div>
         """
-        _render_lead_list(cold_header, cold_raw)
+        _render_lead_list(header, pot_raw, mode="potential")
 
+    with col3:
+        header = f"""
+            <div style="background-color:#ff6b6b;padding:6px 10px;border-radius:10px;
+                        font-weight:700;color:white;text-align:center;margin-bottom:6px;">
+                🔥 Hot customers ({len(hot_raw)}) — Meeting / Quoted
+            </div>
+        """
+        _render_lead_list(header, hot_raw, mode="hot")
 
-# -------------------------------------------------------------
-# SIDEBAR IMPORT / EXPORT + DEDUPE BUTTON
-# -------------------------------------------------------------
 def sidebar_import_export(conn: sqlite3.Connection):
     st.sidebar.header("Import / Export")
 
@@ -2054,6 +2168,95 @@ def build_export_df(conn: sqlite3.Connection, base_df: pd.DataFrame) -> pd.DataF
 # -------------------------------------------------------------
 # CONTACT EDITOR
 # -------------------------------------------------------------
+def add_new_contact_form(conn: sqlite3.Connection):
+    with st.expander("➕ Add new contact", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            first_name = st.text_input("First name", key="new_first")
+            last_name = st.text_input("Last name", key="new_last")
+            job_title = st.text_input("Job title", key="new_job")
+            company = st.text_input("Company", key="new_company")
+        with c2:
+            email = st.text_input("Email", key="new_email")
+            phone = st.text_input("Phone", key="new_phone")
+            website = st.text_input("Website", key="new_website")
+            profile_url = st.text_input("LinkedIn/Profile URL", key="new_profile")
+        with c3:
+            owner = st.selectbox("Owner", OWNERS, key="new_owner")
+            status = st.selectbox("Status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0, key="new_status")
+            application = st.selectbox("Application", [""] + APPLICATIONS, key="new_app")
+            product_interest = st.selectbox("Product interest", [""] + PRODUCTS, key="new_prod")
+
+        # Dates
+        created_at_str = st.text_input("Date added (YYYY-MM-DD)", value=date.today().isoformat(), key="new_created")
+        last_comm_str = st.text_input("Date of last communication (YYYY-MM-DD)", value="", key="new_lastcomm")
+        quote_date_str = st.text_input("Date of quotation (YYYY-MM-DD)", value="", key="new_quote")
+        meeting_date_str = st.text_input("Date of scheduled meeting (YYYY-MM-DD)", value="", key="new_meet")
+
+        note_text = st.text_area("Initial note (optional)", key="new_note", height=120)
+
+        if st.button("Create contact", use_container_width=True, key="new_create_btn"):
+            cur = conn.cursor()
+            email_norm = _norm_email(email) or None
+            profile = _clean_url(profile_url) or None
+            dedupe_key = compute_dedupe_key(first_name, last_name, company, email_norm, profile) or None
+
+            created_at = parse_dt(created_at_str) or datetime.utcnow().isoformat()
+            last_comm = parse_dt(last_comm_str)
+            quote_dt = parse_dt(quote_date_str)
+            meet_dt = parse_dt(meeting_date_str)
+
+            cur.execute(
+                """
+                INSERT INTO contacts(
+                    scan_datetime, created_at,
+                    first_name, last_name, job_title, company,
+                    phone, email, website,
+                    status, owner,
+                    last_touch, last_communication,
+                    quote_date, meeting_date,
+                    application, product_interest, profile_url, dedupe_key
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    None,
+                    created_at,
+                    first_name.strip() or None,
+                    last_name.strip() or None,
+                    job_title.strip() or None,
+                    company.strip() or None,
+                    phone.strip() or None,
+                    email_norm,
+                    website.strip() or None,
+                    status,
+                    owner.strip() or None,
+                    None,
+                    last_comm,
+                    quote_dt,
+                    meet_dt,
+                    application.strip() or None,
+                    product_interest.strip() or None,
+                    profile,
+                    dedupe_key,
+                ),
+            )
+            contact_id = cur.lastrowid
+
+            if note_text.strip():
+                ts_iso = datetime.utcnow().isoformat()
+                cur.execute(
+                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                    (contact_id, ts_iso, note_text.strip(), None),
+                )
+                cur.execute("UPDATE contacts SET last_communication=? WHERE id=?", (ts_iso, contact_id))
+
+            conn.commit()
+            backup_contacts(conn)
+            st.success("Contact created.")
+            st.rerun()
+
+
+
 def contact_editor(conn: sqlite3.Connection, row: pd.Series):
     st.markdown("---")
     contact_id = int(row["id"])
@@ -2076,6 +2279,28 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
         phone = st.text_input("Phone", value=str(row.get("phone") or ""), key=f"ph_{contact_id}")
     with c3:
         website = st.text_input("Website", value=str(row.get("website") or ""), key=f"wb_{contact_id}")
+
+        # Dates (YYYY-MM-DD)
+        created_at_str = st.text_input(
+            "Date added (YYYY-MM-DD)",
+            value=str((row.get("created_at") or row.get("scan_datetime") or "") )[:10],
+            key=f"created_{contact_id}",
+        )
+        last_comm_str = st.text_input(
+            "Date of last communication (YYYY-MM-DD)",
+            value=str((row.get("last_communication") or row.get("last_touch") or "") )[:10],
+            key=f"lastcomm_{contact_id}",
+        )
+        quote_date_str = st.text_input(
+            "Date of quotation (YYYY-MM-DD)",
+            value=str((row.get("quote_date") or "") )[:10],
+            key=f"quote_{contact_id}",
+        )
+        meeting_date_str = st.text_input(
+            "Date of scheduled meeting (YYYY-MM-DD)",
+            value=str((row.get("meeting_date") or "") )[:10],
+            key=f"meet_{contact_id}",
+        )
         profile_url = st.text_input(
             "LinkedIn/Profile URL", value=str(row.get("profile_url") or ""), key=f"li_{contact_id}"
         )
@@ -2149,6 +2374,10 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                   phone=?,
                   email=?,
                   website=?,
+                  created_at=?,
+                  last_communication=?,
+                  quote_date=?,
+                  meeting_date=?,
                   owner=?,
                   gender=?,
                   application=?,
@@ -2336,80 +2565,7 @@ def main():
         show_priority_lists(conn)
 
     with tab_contacts:
-        # ➕ Manual form: create new lead
-        with st.expander("➕ Add lead manually", expanded=False):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                nf = st.text_input("First name", key="new_first_name")
-                nl = st.text_input("Last name", key="new_last_name")
-                nj = st.text_input("Job title", key="new_job_title")
-            with c2:
-                nco = st.text_input("Company", key="new_company")
-                nem = st.text_input("Email", key="new_email")
-                nph = st.text_input("Phone", key="new_phone")
-            with c3:
-                nwb = st.text_input("Website", key="new_website")
-                nli = st.text_input("LinkedIn/Profile URL", key="new_profile_url")
-                now = st.selectbox("Owner", OWNERS, index=0, key="new_owner")
-
-            c4, c5, c6 = st.columns(3)
-            with c4:
-                nst = st.selectbox("Status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0, key="new_status")
-                nge = st.text_input("Gender", key="new_gender")
-            with c5:
-                nap = st.selectbox("Application", [""] + APPLICATIONS, index=0, key="new_application")
-                npi = st.selectbox("Product interest", [""] + PRODUCTS, index=0, key="new_product_interest")
-            with c6:
-                nct = st.text_input("Country", key="new_country")
-                nstate = st.text_input("State/Province", key="new_state")
-                ncity = st.text_input("City", key="new_city")
-
-            na1 = st.text_input("Street", key="new_street")
-            na2 = st.text_input("Street 2", key="new_street2")
-            nzp = st.text_input("Zip", key="new_zip_code")
-
-            note = st.text_area("Initial note (optional)", key="new_note_body")
-            next_fu = st.text_input("Next follow-up (optional)", key="new_next_followup")
-
-            if st.button("Create lead", use_container_width=True, key="create_lead_btn"):
-                new_id = create_contact(
-                    conn,
-                    {
-                        "first_name": nf,
-                        "last_name": nl,
-                        "job_title": nj,
-                        "company": nco,
-                        "email": nem,
-                        "phone": nph,
-                        "website": nwb,
-                        "profile_url": nli,
-                        "owner": now,
-                        "status": nst,
-                        "gender": nge,
-                        "application": nap,
-                        "product_interest": npi,
-                        "country": nct,
-                        "state": nstate,
-                        "city": ncity,
-                        "street": na1,
-                        "street2": na2,
-                        "zip_code": nzp,
-                    },
-                )
-
-                body = sanitize_note_text(note, trim_email_threads=False)
-                if body:
-                    ts_iso = datetime.utcnow().isoformat()
-                    conn.execute(
-                        "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                        (int(new_id), ts_iso, body, next_fu.strip() or None),
-                    )
-                    conn.commit()
-
-                backup_contacts(conn)
-                ensure_dedupe_index(conn)
-                st.success(f"Lead saved (id={new_id}).")
-                st.rerun()
+        add_new_contact_form(conn)
 
         q, cats, stats, st_like, app_filter, prod_filter = filters_ui()
         df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
@@ -2474,3 +2630,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
