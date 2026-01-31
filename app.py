@@ -878,6 +878,22 @@ def parse_dt(v) -> Optional[str]:
     except Exception:
         return str(v)
 
+def parse_date_only(v: Any) -> Optional[str]:
+    """Parse a date-like value and return YYYY-MM-DD (or None)."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() == "nan":
+        return None
+    try:
+        dt = dtparser.parse(s)
+        return dt.date().isoformat()
+    except Exception:
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+            return s
+        return None
+
+
 
 def normalize_status(val: Any) -> Optional[str]:
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -2350,6 +2366,11 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
 
     dedupe_key = compute_dedupe_key(first_name, last_name, company, email, profile_url)
 
+    created_at = parse_date_only(created_at_str) or None
+    last_communication = parse_date_only(last_comm_str) or None
+    quote_date = parse_date_only(quote_date_str) or None
+    meeting_date = parse_date_only(meeting_date_str) or None
+
     csave1, csave2, _ = st.columns([1, 1, 3])
     with csave1:
         if st.button("💾 Save contact", key=f"save_{contact_id}"):
@@ -2387,7 +2408,7 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                 WHERE id=?
                 """,
                 (
-                    first_name.strip() or None,
+                                        first_name.strip() or None,
                     last_name.strip() or None,
                     job_title.strip() or None,
                     company.strip() or None,
@@ -2400,6 +2421,10 @@ def contact_editor(conn: sqlite3.Connection, row: pd.Series):
                     phone.strip() or None,
                     _norm_email(email) or None,
                     _clean_url(website) or None,
+                    created_at,
+                    last_communication,
+                    quote_date,
+                    meeting_date,
                     owner.strip() or None,
                     gender.strip() or None,
                     normalize_application(application) if application else None,
