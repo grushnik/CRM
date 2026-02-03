@@ -42,10 +42,19 @@ APPLICATIONS = sorted(
         "Ultrasonic",
         "Nitrification",
         "Surface treatment",
+        "Oblation",
+        "Educational purpose",
+        "Material processing",
+        "Etching",
+        "Coating",
+        "Spraying",
+        "Sterilization",
+        "Powder injection",
+
     ]
 )
 
-PRODUCTS = ["1 kW", "10 kW", "100 kW", "1 MW"]
+PRODUCTS = ["1 kW", "1.5 kW", "10 kW", "100 kW", "1 MW"]
 
 PIPELINE = [
     "New",
@@ -69,6 +78,15 @@ def safe_int_series(s: pd.Series, default: int = 0) -> pd.Series:
 def safe_float_series(s: pd.Series, default: float = 0.0) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(default).astype("float64")
 
+
+
+# -------------------------------------------------------------
+# session_state helpers
+# -------------------------------------------------------------
+def clear_keys(keys: List[str]):
+    """Remove keys from st.session_state (used to clear forms)."""
+    for k in keys:
+        st.session_state.pop(k, None)
 
 # -------------------------------------------------------------
 # NOTES IMPORT sanitize + trim email threads
@@ -960,6 +978,24 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Ultrasonic"
     if "surface" in s and ("treat" in s or "coating" in s or "modify" in s):
         return "Surface treatment"
+
+    # Added 2026-02: expanded applications
+    if "oblation" in s:
+        return "Oblation"
+    if "educat" in s or "teaching" in s or "demo" in s:
+        return "Educational purpose"
+    if "material" in s and "process" in s:
+        return "Material processing"
+    if "etch" in s:
+        return "Etching"
+    if "coat" in s:
+        return "Coating"
+    if "spray" in s:
+        return "Spraying"
+    if "steriliz" in s or "decontamin" in s:
+        return "Sterilization"
+    if "powder" in s and ("inject" in s or "injection" in s):
+        return "Powder injection"
     return None
 
 
@@ -1954,6 +1990,8 @@ def _render_lead_list(title_html: str, df: pd.DataFrame, mode: str):
         email = (sub.get("email") or "").strip()
         status = (sub.get("status") or "").strip()
 
+        owner = (sub.get("owner") or "").strip()
+
         product = (sub.get("product_interest") or "").strip()
         application = (sub.get("application") or "").strip()
 
@@ -1974,16 +2012,27 @@ def _render_lead_list(title_html: str, df: pd.DataFrame, mode: str):
 
         if mode == "new" and created_at:
             meta_bits.append(f"added: {created_at}")
-        elif mode == "potential" and last_comm:
-            meta_bits.append(f"last comm: {last_comm}")
+        elif mode == "potential":
+            # requested: show scheduled meeting + owner in Potential sales list
+            if last_comm:
+                meta_bits.append(f"last comm: {last_comm}")
+            if meet_dt:
+                meta_bits.append(f"meeting: {meet_dt}")
+            if owner:
+                meta_bits.append(f"owner: {owner}")
         elif mode == "hot":
+            # requested: show last comm + meeting + quote + owner in Hot customers list
             date_bits = []
+            if last_comm:
+                date_bits.append(f"last comm: {last_comm}")
             if meet_dt:
                 date_bits.append(f"meeting: {meet_dt}")
             if quote_dt:
                 date_bits.append(f"quote: {quote_dt}")
             if date_bits:
                 meta_bits.append(" • ".join(date_bits))
+            if owner:
+                meta_bits.append(f"owner: {owner}")
 
         meta = " • ".join(meta_bits) if meta_bits else "—"
 
@@ -2203,6 +2252,11 @@ def add_new_contact_form(conn: sqlite3.Connection):
             application = st.selectbox("Application", [""] + APPLICATIONS, key="new_app")
             product_interest = st.selectbox("Product interest", [""] + PRODUCTS, key="new_prod")
 
+        # Location
+        country = st.text_input("Country", key="new_country")
+        state = st.text_input("State", key="new_state")
+        city = st.text_input("City", key="new_city")
+
         # Dates
         created_at_str = st.text_input("Date added (YYYY-MM-DD)", value=date.today().isoformat(), key="new_created")
         last_comm_str = st.text_input("Date of last communication (YYYY-MM-DD)", value="", key="new_lastcomm")
@@ -2210,8 +2264,24 @@ def add_new_contact_form(conn: sqlite3.Connection):
         meeting_date_str = st.text_input("Date of scheduled meeting (YYYY-MM-DD)", value="", key="new_meet")
 
         note_text = st.text_area("Initial note (optional)", key="new_note", height=120)
+        b1, b2 = st.columns([1, 1])
+        with b1:
+            create_clicked = st.button("Create contact", use_container_width=True, key="new_create_btn")
+        with b2:
+            clear_clicked = st.button("🧹 Clear form", use_container_width=True, key="new_clear_btn")
 
-        if st.button("Create contact", use_container_width=True, key="new_create_btn"):
+        if clear_clicked:
+            clear_keys([
+                "new_first", "new_last", "new_job", "new_company",
+                "new_email", "new_phone", "new_website", "new_profile",
+                "new_owner", "new_status", "new_app", "new_prod",
+                "new_country", "new_state", "new_city",
+                "new_created", "new_lastcomm", "new_quote", "new_meet",
+                "new_note",
+            ])
+            st.rerun()
+
+        if create_clicked:
             cur = conn.cursor()
             email_norm = _norm_email(email) or None
             profile = _clean_url(profile_url) or None
@@ -2222,11 +2292,16 @@ def add_new_contact_form(conn: sqlite3.Connection):
             quote_dt = parse_dt(quote_date_str)
             meet_dt = parse_dt(meeting_date_str)
 
+            country_v = (country or "").strip() or None
+            state_v = (state or "").strip() or None
+            city_v = (city or "").strip() or None
+
             cur.execute(
                 """
                 INSERT INTO contacts(
                     scan_datetime, created_at,
                     first_name, last_name, job_title, company,
+                    city, state, country,
                     phone, email, website,
                     status, owner,
                     last_touch, last_communication,
@@ -2241,6 +2316,9 @@ def add_new_contact_form(conn: sqlite3.Connection):
                     last_name.strip() or None,
                     job_title.strip() or None,
                     company.strip() or None,
+                                        city_v,
+                    state_v,
+                    country_v,
                     phone.strip() or None,
                     email_norm,
                     website.strip() or None,
@@ -2655,4 +2733,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
