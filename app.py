@@ -88,6 +88,74 @@ def clear_keys(keys: List[str]):
     for k in keys:
         st.session_state.pop(k, None)
 
+
+def parse_website_request_blob(text: str) -> Dict[str, Any]:
+    """Parse pasted Radom website request blob (Key: value per line).
+
+    Expected keys include (case-insensitive):
+      request-fullname, request-company, request-email, request-usecase
+    Also captures any '*Brochure' / '*White Paper' items set to true/yes/1.
+    Returns normalized fields plus a rendered note string.
+    """
+    raw = (text or "").strip()
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+    kv: Dict[str, str] = {}
+    for ln in lines:
+        if ":" not in ln:
+            continue
+        k, v = ln.split(":", 1)
+        kv[k.strip().lower()] = v.strip()
+
+    fullname = kv.get("request-fullname", "") or kv.get("fullname", "")
+    company = kv.get("request-company", "") or kv.get("company", "")
+    email = kv.get("request-email", "") or kv.get("email", "")
+    usecase = kv.get("request-usecase", "") or kv.get("usecase", "")
+
+    # Split fullname -> first/last (simple heuristic)
+    parts = [p for p in re.split(r"\s+", fullname.strip()) if p]
+    first_name = parts[0] if parts else ""
+    last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    # Requested assets (brochures / white papers)
+    requested_labels: List[str] = []
+    for k, v in kv.items():
+        if any(x in k for x in ["brochure", "white paper", "whitepaper"]):
+            val = (v or "").strip().lower()
+            truthy = val in ("true", "yes", "1", "on")
+            if truthy:
+                # keep original-ish label (capitalize nicely)
+                label = k.replace("whitepaper", "white paper")
+                # preserve known acronyms
+                words = []
+                for w in re.split(r"\s+", label.replace("-", " ")):
+                    if w.upper() in ("PFAS", "NOX", "CO2"):
+                        words.append(w.upper() if w.upper() != "NOX" else "NOx")
+                    else:
+                        words.append(w.capitalize())
+                requested_labels.append(" ".join(words))
+
+    note_lines: List[str] = []
+    if requested_labels:
+        note_lines.append("Website literature request:")
+        for r in requested_labels:
+            note_lines.append(f"- {r}")
+    if usecase.strip():
+        note_lines.append(f"Use case (from website): {usecase.strip()}")
+    if raw:
+        note_lines.append("")
+        note_lines.append("Raw website submission:")
+        note_lines.append(raw)
+
+    return {
+        "first_name": first_name.strip(),
+        "last_name": last_name.strip(),
+        "company": company.strip(),
+        "email": email.strip(),
+        "application_raw": usecase.strip(),
+        "note": "\n".join(note_lines).strip(),
+    }
+
 # -------------------------------------------------------------
 # NOTES IMPORT sanitize + trim email threads
 # -------------------------------------------------------------
@@ -2234,120 +2302,272 @@ def build_export_df(conn: sqlite3.Connection, base_df: pd.DataFrame) -> pd.DataF
 # CONTACT EDITOR
 # -------------------------------------------------------------
 def add_new_contact_form(conn: sqlite3.Connection):
+    # Ensure DB schema is ready even if this form is called early
+    init_db(conn)
+
     with st.expander("➕ Add new contact", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            first_name = st.text_input("First name", key="new_first")
-            last_name = st.text_input("Last name", key="new_last")
-            job_title = st.text_input("Job title", key="new_job")
-            company = st.text_input("Company", key="new_company")
-        with c2:
-            email = st.text_input("Email", key="new_email")
-            phone = st.text_input("Phone", key="new_phone")
-            website = st.text_input("Website", key="new_website")
-            profile_url = st.text_input("LinkedIn/Profile URL", key="new_profile")
-        with c3:
-            owner = st.selectbox("Owner", OWNERS, key="new_owner")
-            status = st.selectbox("Status", PIPELINE, index=PIPELINE.index("New") if "New" in PIPELINE else 0, key="new_status")
-            application = st.selectbox("Application", [""] + APPLICATIONS, key="new_app")
-            product_interest = st.selectbox("Product interest", [""] + PRODUCTS, key="new_prod")
+        t_manual, t_paste = st.tabs(["Manual entry", "Paste website request"])
 
-        # Location
-        country = st.text_input("Country", key="new_country")
-        state = st.text_input("State", key="new_state")
-        city = st.text_input("City", key="new_city")
-
-        # Dates
-        created_at_str = st.text_input("Date added (YYYY-MM-DD)", value=date.today().isoformat(), key="new_created")
-        last_comm_str = st.text_input("Date of last communication (YYYY-MM-DD)", value="", key="new_lastcomm")
-        quote_date_str = st.text_input("Date of quotation (YYYY-MM-DD)", value="", key="new_quote")
-        meeting_date_str = st.text_input("Date of scheduled meeting (YYYY-MM-DD)", value="", key="new_meet")
-
-        note_text = st.text_area("Initial note (optional)", key="new_note", height=120)
-        b1, b2 = st.columns([1, 1])
-        with b1:
-            create_clicked = st.button("Create contact", use_container_width=True, key="new_create_btn")
-        with b2:
-            clear_clicked = st.button("🧹 Clear form", use_container_width=True, key="new_clear_btn")
-
-        if clear_clicked:
-            clear_keys([
-                "new_first", "new_last", "new_job", "new_company",
-                "new_email", "new_phone", "new_website", "new_profile",
-                "new_owner", "new_status", "new_app", "new_prod",
-                "new_country", "new_state", "new_city",
-                "new_created", "new_lastcomm", "new_quote", "new_meet",
-                "new_note",
-            ])
-            st.rerun()
-
-        if create_clicked:
-            cur = conn.cursor()
-            email_norm = _norm_email(email) or None
-            profile = _clean_url(profile_url) or None
-            dedupe_key = compute_dedupe_key(first_name, last_name, company, email_norm, profile) or None
-
-            created_at = parse_dt(created_at_str) or datetime.utcnow().isoformat()
-            last_comm = parse_dt(last_comm_str)
-            quote_dt = parse_dt(quote_date_str)
-            meet_dt = parse_dt(meeting_date_str)
-
-            country_v = (country or "").strip() or None
-            state_v = (state or "").strip() or None
-            city_v = (city or "").strip() or None
-
-            cur.execute(
-                """
-                INSERT INTO contacts(
-                    scan_datetime, created_at,
-                    first_name, last_name, job_title, company,
-                    city, state, country,
-                    phone, email, website,
-                    status, owner,
-                    last_touch, last_communication,
-                    quote_date, meeting_date,
-                    application, product_interest, profile_url, dedupe_key
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    None,
-                    created_at,
-                    first_name.strip() or None,
-                    last_name.strip() or None,
-                    job_title.strip() or None,
-                    company.strip() or None,
-                                        city_v,
-                    state_v,
-                    country_v,
-                    phone.strip() or None,
-                    email_norm,
-                    website.strip() or None,
-                    status,
-                    owner.strip() or None,
-                    None,
-                    last_comm,
-                    quote_dt,
-                    meet_dt,
-                    application.strip() or None,
-                    product_interest.strip() or None,
-                    profile,
-                    dedupe_key,
-                ),
-            )
-            contact_id = cur.lastrowid
-
-            if note_text.strip():
-                ts_iso = datetime.utcnow().isoformat()
-                cur.execute(
-                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
-                    (contact_id, ts_iso, note_text.strip(), None),
+        # -------------------------
+        # Manual entry (existing)
+        # -------------------------
+        with t_manual:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                first_name = st.text_input("First name", key="new_first")
+                last_name = st.text_input("Last name", key="new_last")
+                job_title = st.text_input("Job title", key="new_job")
+                company = st.text_input("Company", key="new_company")
+            with c2:
+                email = st.text_input("Email", key="new_email")
+                phone = st.text_input("Phone", key="new_phone")
+                website = st.text_input("Website", key="new_website")
+                profile_url = st.text_input("LinkedIn/Profile URL", key="new_profile")
+            with c3:
+                owner = st.selectbox("Owner", OWNERS, key="new_owner")
+                status = st.selectbox(
+                    "Status",
+                    PIPELINE,
+                    index=PIPELINE.index("New") if "New" in PIPELINE else 0,
+                    key="new_status",
                 )
-                cur.execute("UPDATE contacts SET last_communication=? WHERE id=?", (ts_iso, contact_id))
+                application = st.selectbox("Application", [""] + APPLICATIONS, key="new_app")
+                product_interest = st.selectbox("Product interest", [""] + PRODUCTS, key="new_prod")
 
-            conn.commit()
-            backup_contacts(conn)
-            st.success("Contact created.")
-            st.rerun()
+            # Location
+            country = st.text_input("Country", key="new_country")
+            state = st.text_input("State", key="new_state")
+            city = st.text_input("City", key="new_city")
+
+            # Dates
+            created_at_str = st.text_input(
+                "Date added (YYYY-MM-DD)",
+                value=date.today().isoformat(),
+                key="new_created",
+            )
+            last_comm_str = st.text_input("Date of last communication (YYYY-MM-DD)", value="", key="new_lastcomm")
+            quote_date_str = st.text_input("Date of quotation (YYYY-MM-DD)", value="", key="new_quote")
+            meeting_date_str = st.text_input("Date of scheduled meeting (YYYY-MM-DD)", value="", key="new_meet")
+
+            note_text = st.text_area("Initial note (optional)", key="new_note", height=120)
+
+            b1, b2 = st.columns([1, 1])
+            with b1:
+                create_clicked = st.button("Create contact", use_container_width=True, key="new_create_btn")
+            with b2:
+                clear_clicked = st.button("🧹 Clear form", use_container_width=True, key="new_clear_btn")
+
+            if clear_clicked:
+                clear_keys(
+                    [
+                        "new_first",
+                        "new_last",
+                        "new_job",
+                        "new_company",
+                        "new_email",
+                        "new_phone",
+                        "new_website",
+                        "new_profile",
+                        "new_owner",
+                        "new_status",
+                        "new_app",
+                        "new_prod",
+                        "new_country",
+                        "new_state",
+                        "new_city",
+                        "new_created",
+                        "new_lastcomm",
+                        "new_quote",
+                        "new_meet",
+                        "new_note",
+                    ]
+                )
+                st.rerun()
+
+            if create_clicked:
+                cur = conn.cursor()
+                email_norm = _norm_email(email) or None
+                profile = _clean_url(profile_url) or None
+                dedupe_key = compute_dedupe_key(first_name, last_name, company, email_norm, profile) or None
+
+                created_at = parse_dt(created_at_str) or datetime.utcnow().isoformat()
+                last_comm = parse_dt(last_comm_str)
+                quote_dt = parse_dt(quote_date_str)
+                meet_dt = parse_dt(meeting_date_str)
+
+                country_v = (country or "").strip() or None
+                state_v = (state or "").strip() or None
+                city_v = (city or "").strip() or None
+
+                cur.execute(
+                    """
+                    INSERT INTO contacts(
+                        scan_datetime, created_at,
+                        first_name, last_name, job_title, company,
+                        city, state, country,
+                        phone, email, website,
+                        status, owner,
+                        last_touch, last_communication,
+                        quote_date, meeting_date,
+                        application, product_interest, profile_url, dedupe_key
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        None,
+                        created_at,
+                        first_name.strip() or None,
+                        last_name.strip() or None,
+                        job_title.strip() or None,
+                        company.strip() or None,
+                        city_v,
+                        state_v,
+                        country_v,
+                        phone.strip() or None,
+                        email_norm,
+                        website.strip() or None,
+                        status,
+                        owner.strip() or None,
+                        None,
+                        last_comm,
+                        quote_dt,
+                        meet_dt,
+                        normalize_application(application) if application else None,
+                        product_interest.strip() or None,
+                        profile,
+                        dedupe_key,
+                    ),
+                )
+                contact_id = int(cur.lastrowid)
+
+                if note_text.strip():
+                    ts_iso = datetime.utcnow().isoformat()
+                    body = sanitize_note_text(note_text, trim_email_threads=False)
+                    cur.execute(
+                        "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                        (contact_id, ts_iso, body, None),
+                    )
+                    cur.execute("UPDATE contacts SET last_communication=? WHERE id=?", (ts_iso, contact_id))
+
+                conn.commit()
+                backup_contacts(conn)
+                ensure_dedupe_index(conn)
+
+                st.session_state["last_created_contact_id"] = contact_id
+                st.success("Contact created. Opening it for editing…")
+                st.rerun()
+
+        # -------------------------
+        # Paste website request
+        # -------------------------
+        with t_paste:
+            st.caption("Paste the website submission text (Key: value per line).")
+            blob = st.text_area(
+                "Website submission",
+                key="paste_blob",
+                height=220,
+                placeholder="Altair-Mira Brochure: true\n...\nrequest-fullname: ...\nrequest-company: ...\nrequest-email: ...\nrequest-usecase: ...",
+            )
+
+            cA, cB, cC = st.columns([1.2, 1.2, 2.6])
+            with cA:
+                paste_owner = st.selectbox("Owner", OWNERS, key="paste_owner")
+                paste_status = st.selectbox(
+                    "Status",
+                    PIPELINE,
+                    index=PIPELINE.index("New") if "New" in PIPELINE else 0,
+                    key="paste_status",
+                )
+            with cB:
+                paste_product = st.selectbox("Product interest (optional)", [""] + PRODUCTS, key="paste_prod")
+            with cC:
+                st.write("")
+                st.write("Tip: After creating, edit the lead below to add more details.")
+
+            bpa, bpb = st.columns([1, 1])
+            with bpa:
+                create_from_paste = st.button("✨ Create lead from paste", use_container_width=True, key="paste_create_btn")
+            with bpb:
+                clear_paste = st.button("🧹 Clear paste", use_container_width=True, key="paste_clear_btn")
+
+            if clear_paste:
+                clear_keys(["paste_blob", "paste_owner", "paste_status", "paste_prod"])
+                st.rerun()
+
+            if create_from_paste:
+                parsed = parse_website_request_blob(blob)
+
+                first_name = (parsed.get("first_name") or "").strip() or None
+                last_name = (parsed.get("last_name") or "").strip() or None
+                company = (parsed.get("company") or "").strip() or None
+                email_norm = _norm_email(parsed.get("email")) or None
+
+                application = normalize_application(parsed.get("application_raw")) if parsed.get("application_raw") else None
+                product_interest = (paste_product or "").strip() or None
+                owner = (paste_owner or "").strip() or None
+                status = (paste_status or "New").strip() or "New"
+
+                profile = None
+                dedupe_key = compute_dedupe_key(first_name, last_name, company, email_norm, profile) or None
+
+                created_at = datetime.utcnow().isoformat()
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO contacts(
+                        scan_datetime, created_at,
+                        first_name, last_name, job_title, company,
+                        city, state, country,
+                        phone, email, website,
+                        status, owner,
+                        last_touch, last_communication,
+                        quote_date, meeting_date,
+                        application, product_interest, profile_url, dedupe_key
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        None,
+                        created_at,
+                        first_name,
+                        last_name,
+                        None,
+                        company,
+                        None,
+                        None,
+                        None,
+                        None,
+                        email_norm,
+                        None,
+                        status,
+                        owner,
+                        None,
+                        None,
+                        None,
+                        None,
+                        application,
+                        product_interest,
+                        None,
+                        dedupe_key,
+                    ),
+                )
+                contact_id = int(cur.lastrowid)
+
+                note_text = (parsed.get("note") or "").strip()
+                if note_text:
+                    ts_iso = datetime.utcnow().isoformat()
+                    body = sanitize_note_text(note_text, trim_email_threads=False)
+                    cur.execute(
+                        "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                        (contact_id, ts_iso, body, None),
+                    )
+                    cur.execute("UPDATE contacts SET last_communication=? WHERE id=?", (ts_iso, contact_id))
+
+                conn.commit()
+                backup_contacts(conn)
+                ensure_dedupe_index(conn)
+
+                st.session_state["last_created_contact_id"] = contact_id
+                st.success("Lead created from website paste. Opening it for editing…")
+                st.rerun()
 
 
 
@@ -2718,11 +2938,21 @@ def main():
             int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {r.company or ''} ({r.email or ''})"
             for r in df.itertuples(index=False)
         }
+        last_created = st.session_state.get("last_created_contact_id")
+        keys = list(options.keys())
+        default_index = 0
+        if last_created in options:
+            default_index = keys.index(int(last_created))
+
         picked = st.selectbox(
             "Select contact to edit",
-            list(options.keys()),
+            keys,
+            index=default_index,
             format_func=lambda cid: options.get(cid, str(cid)),
         )
+
+        if "last_created_contact_id" in st.session_state:
+            st.session_state.pop("last_created_contact_id", None)
 
         row = df[df["id"] == picked].iloc[0]
         contact_editor(conn, row)
@@ -2733,5 +2963,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
