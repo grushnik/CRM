@@ -549,7 +549,7 @@ def build_followup_email_body(df: pd.DataFrame) -> str:
         owner = (getattr(r, "owner", "") or "").strip()
         product = (getattr(r, "product_interest", "") or "").strip()
         app = (getattr(r, "application", "") or "").strip()
-        meeting = (getattr(r, "scheduled_meeting", "") or "").strip()
+        meeting = (getattr(r, "meeting_date", "") or "").strip()
         last_comm = (getattr(r, "last_note_ts", "") or getattr(r, "last_touch", "") or "").strip()
 
         lines.append(f"{i}) {name}" + (f" — {company}" if company else ""))
@@ -580,9 +580,7 @@ def build_followup_email_body(df: pd.DataFrame) -> str:
     lines.append("Thanks!")
     lines.append("— Radom CRM")
 
-    return "\n".join(lines)
-
-".join(lines).strip()
+    return "\n".join(lines).strip()
 
 def mailto_link(to_email: str, subject: str, body: str) -> str:
     return f"mailto:{to_email}?subject={quote(subject)}&body={quote(body)}"
@@ -3122,6 +3120,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
