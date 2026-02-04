@@ -534,60 +534,54 @@ def _fmt_date10(s: Any) -> str:
     return s[:10] if len(s) >= 10 else s
 
 def build_followup_email_body(df: pd.DataFrame) -> str:
-    """Build a plain-text email body listing selected leads."""
-    lines: List[str] = []
+    lines = []
     lines.append("Hi,")
     lines.append("")
     lines.append("Could you please follow up on the leads below?")
     lines.append("")
 
-    for i, r in enumerate(df.to_dict(orient="records"), start=1):
-        first = (r.get("first_name") or "").strip()
-        last = (r.get("last_name") or "").strip()
-        name = (f"{first} {last}").strip() or "—"
+    for i, r in enumerate(df.itertuples(index=False), start=1):
+        name = f"{getattr(r,'first_name','') or ''} {getattr(r,'last_name','') or ''}".strip() or "—"
+        company = (getattr(r, "company", "") or "").strip()
+        email = (getattr(r, "email", "") or "").strip()
+        prof = (getattr(r, "profile_url", "") or "").strip()
+        status = (getattr(r, "status", "") or "New").strip()
+        owner = (getattr(r, "owner", "") or "").strip()
+        product = (getattr(r, "product_interest", "") or "").strip()
+        app = (getattr(r, "application", "") or "").strip()
+        meeting = (getattr(r, "scheduled_meeting", "") or "").strip()
+        last_comm = (getattr(r, "last_note_ts", "") or getattr(r, "last_touch", "") or "").strip()
 
-        company = (r.get("company") or "").strip()
-        email = (r.get("email") or "").strip()
-        prof = (r.get("profile_url") or "").strip()
-        status = (r.get("status") or "New").strip()
-        owner = (r.get("owner") or "").strip()
-        product = (r.get("product_interest") or "").strip()
-        app = (r.get("application") or "").strip()
-
-        meeting = _fmt_date10(r.get("meeting_date") or "")
-        last_comm = _fmt_date10(r.get("last_communication") or r.get("last_note_ts") or r.get("last_touch") or "")
-
-        header = f"{i}) {name}"
-        if company:
-            header += f" — {company}"
-        lines.append(header)
-
+        lines.append(f"{i}) {name}" + (f" — {company}" if company else ""))
         if email:
             lines.append(f"   Email: {email}")
         if prof:
             lines.append(f"   Profile: {prof}")
 
-        bits: List[str] = []
+        meta = []
         if status:
-            bits.append(f"Status: {status}")
+            meta.append(f"Status: {status}")
         if owner:
-            bits.append(f"Owner: {owner}")
+            meta.append(f"Owner: {owner}")
         if meeting:
-            bits.append(f"Meeting: {meeting}")
+            meta.append(f"Meeting: {meeting}")
         if last_comm:
-            bits.append(f"Last comm: {last_comm}")
+            meta.append(f"Last comm: {last_comm[:10]}")
         if product:
-            bits.append(f"Product: {product}")
+            meta.append(f"Product: {product}")
         if app:
-            bits.append(f"Application: {app}")
+            meta.append(f"Application: {app}")
 
-        if bits:
-            lines.append("   " + " | ".join(bits))
+        if meta:
+            lines.append("   " + " | ".join(meta))
+
         lines.append("")
 
     lines.append("Thanks!")
     lines.append("— Radom CRM")
-    return "
+
+    return "\n".join(lines)
+
 ".join(lines).strip()
 
 def mailto_link(to_email: str, subject: str, body: str) -> str:
@@ -3128,6 +3122,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
