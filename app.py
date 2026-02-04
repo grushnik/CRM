@@ -77,6 +77,8 @@ FOLLOWUP_RECIPIENTS = {
     "Liz": "egrushnikova@radomcorp.com",
 }
 
+FOLLOWUP_CC = "radom@radomcorp.com"
+
 # -------------------------------------------------------------
 # dtype-safe numeric helpers
 # -------------------------------------------------------------
@@ -582,8 +584,11 @@ def build_followup_email_body(df: pd.DataFrame) -> str:
 
     return "\n".join(lines).strip()
 
-def mailto_link(to_email: str, subject: str, body: str) -> str:
-    return f"mailto:{to_email}?subject={quote(subject)}&body={quote(body)}"
+def mailto_link(to_email: str, subject: str, body: str, cc_email: Optional[str] = None) -> str:
+    qs = [f"subject={quote(subject)}", f"body={quote(body)}"]
+    if cc_email:
+        qs.insert(0, f"cc={quote(cc_email)}")
+    return f"mailto:{to_email}?" + "&".join(qs)
 
 
 # -------------------------------------------------------------
@@ -2226,6 +2231,114 @@ def show_priority_lists(conn: sqlite3.Connection):
         st.caption("No contacts yet – add someone manually or import a file.")
         return
 
+
+    # -------------------------------------------------------------
+    # Follow-up email helper (from Overview)
+    # -------------------------------------------------------------
+    st.markdown("### 📧 Ask teammate to follow up (from Overview)")
+    st.caption("Select one or more leads from the Overview buckets and generate an email draft.")
+
+    # Build a pick list from the same buckets shown below
+    df_pick = df_all.copy()
+    df_pick["status"] = df_pick["status"].fillna("New").astype(str)
+
+    def _bucket(s: str) -> str:
+        s = (s or "New").strip()
+        if s == "New":
+            return "❄️ Cold"
+        if s == "Contacted":
+            return "🔵 Potential"
+        if s in ("Meeting", "Quoted"):
+            return "🔥 Hot"
+        return "Other"
+
+    df_pick["Bucket"] = df_pick["status"].apply(_bucket)
+    df_pick = df_pick[df_pick["Bucket"].isin(["❄️ Cold", "🔵 Potential", "🔥 Hot"])].copy()
+
+    df_pick["Lead"] = (
+        df_pick["first_name"].fillna("").astype(str).str.strip()
+        + " "
+        + df_pick["last_name"].fillna("").astype(str).str.strip()
+    ).str.strip()
+    df_pick["Lead"] = df_pick["Lead"].where(df_pick["Lead"] != "", "—") + " — " + df_pick["company"].fillna("").astype(str).str.strip()
+
+    df_pick["Last comm"] = df_pick["last_note_ts"].fillna("").astype(str)
+    df_pick.loc[df_pick["Last comm"] == "", "Last comm"] = df_pick["last_touch"].fillna("").astype(str)
+    df_pick["Last comm"] = df_pick["Last comm"].apply(lambda x: x[:10] if isinstance(x, str) else "")
+
+    df_pick["Meeting"] = df_pick["meeting_date"].fillna("").astype(str)
+    df_pick["Select"] = False
+
+    view_cols = ["Select", "Bucket", "Lead", "email", "owner", "Meeting", "Last comm", "status", "product_interest", "application", "profile_url", "id"]
+    for c in view_cols:
+        if c not in df_pick.columns:
+            df_pick[c] = ""
+
+    edited = st.data_editor(
+        df_pick[view_cols],
+        hide_index=True,
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select", default=False),
+            "Bucket": st.column_config.TextColumn("Bucket", disabled=True),
+            "Lead": st.column_config.TextColumn("Lead", disabled=True),
+            "email": st.column_config.TextColumn("Email", disabled=True),
+            "owner": st.column_config.TextColumn("Owner", disabled=True),
+            "Meeting": st.column_config.TextColumn("Meeting", disabled=True),
+            "Last comm": st.column_config.TextColumn("Last comm", disabled=True),
+            "status": st.column_config.TextColumn("Status", disabled=True),
+            "product_interest": st.column_config.TextColumn("Product", disabled=True),
+            "application": st.column_config.TextColumn("Application", disabled=True),
+            "profile_url": st.column_config.TextColumn("Profile", disabled=True),
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+        },
+        use_container_width=True,
+        height=260,
+        disabled=["Bucket", "Lead", "email", "owner", "Meeting", "Last comm", "status", "product_interest", "application", "profile_url", "id"],
+    )
+
+    selected_ids = edited.loc[edited["Select"] == True, "id"].tolist() if "Select" in edited.columns else []
+    if selected_ids:
+        cc1, cc2 = st.columns([1.6, 1.0])
+        with cc1:
+            recipient_name = st.selectbox("Send to", list(FOLLOWUP_RECIPIENTS.keys()), index=0, key="ov_follow_recipient")
+        with cc2:
+            st.write("")
+            st.write(f"CC: {FOLLOWUP_CC}")
+
+        sub_df = df_all[df_all["id"].isin(selected_ids)].copy()
+        subject = f"Radom CRM follow-up: {len(sub_df)} lead(s)"
+        body = build_followup_email_body(
+            sub_df[
+                [
+                    "first_name",
+                    "last_name",
+                    "company",
+                    "email",
+                    "profile_url",
+                    "status",
+                    "owner",
+                    "product_interest",
+                    "application",
+                    "meeting_date",
+                    "last_note_ts",
+                    "last_touch",
+                ]
+            ].fillna("")
+        )
+        link = mailto_link(FOLLOWUP_RECIPIENTS[recipient_name], subject, body, cc_email=FOLLOWUP_CC)
+
+        st.markdown(
+            f"<a href='{link}' style='text-decoration:none;'>"
+            f"<button style='padding:10px 14px;border-radius:10px;border:0;"
+            f"background:#5a22ff;color:white;font-weight:700;cursor:pointer;'>"
+            f"📧 Ask {recipient_name} to follow up</button></a>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Select at least one lead above to generate an email draft.")
+
+    st.markdown("---")
+
     df_all["status"] = df_all["status"].fillna("New").astype(str).str.strip()
 
     st.caption("⚡ Quick move lead between buckets")
@@ -3078,7 +3191,7 @@ def main():
                     ].fillna("")
                 )
 
-                link = mailto_link(FOLLOWUP_RECIPIENTS[recipient_name], subject, body)
+                link = mailto_link(FOLLOWUP_RECIPIENTS[recipient_name], subject, body, cc_email=FOLLOWUP_CC)
 
                 st.markdown(
                     f"""<a href='{link}' style='text-decoration:none;'>
