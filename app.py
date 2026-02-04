@@ -6,6 +6,7 @@ import time
 import csv
 from datetime import datetime, date
 from typing import List, Any, Optional, Dict, Tuple
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -67,6 +68,14 @@ PIPELINE = [
 ]
 
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin", "Annie"]
+
+FOLLOWUP_RECIPIENTS = {
+    \"Velibor\": \"vpikelja@radomcorp.com\",
+    \"Jovan\": \"jjevtic@radomcorp.com\",
+    \"Ian\": \"imckinney@radomcorp.com\",
+    \"Annie\": \"aminga@radomcorp.com\",
+    \"Liz\": \"egrushnikova@radomcorp.com\",
+}
 
 # -------------------------------------------------------------
 # dtype-safe numeric helpers
@@ -515,6 +524,74 @@ def compute_dedupe_key(first: Any, last: Any, company: Any, email: Any, profile_
     if fn or ln or co:
         return f"nameco:{fn}|{ln}|{co}"
     return ""
+
+
+# -------------------------------------------------------------
+# FOLLOW-UP EMAIL (mailto)
+# -------------------------------------------------------------
+def _fmt_date10(s: Any) -> str:
+    s = ("" if s is None else str(s)).strip()
+    return s[:10] if len(s) >= 10 else s
+
+def build_followup_email_body(df: pd.DataFrame) -> str:
+    """Build a plain-text email body listing selected leads."""
+    lines: List[str] = []
+    lines.append("Hi,")
+    lines.append("")
+    lines.append("Could you please follow up on the leads below?")
+    lines.append("")
+
+    for i, r in enumerate(df.to_dict(orient="records"), start=1):
+        first = (r.get("first_name") or "").strip()
+        last = (r.get("last_name") or "").strip()
+        name = (f"{first} {last}").strip() or "—"
+
+        company = (r.get("company") or "").strip()
+        email = (r.get("email") or "").strip()
+        prof = (r.get("profile_url") or "").strip()
+        status = (r.get("status") or "New").strip()
+        owner = (r.get("owner") or "").strip()
+        product = (r.get("product_interest") or "").strip()
+        app = (r.get("application") or "").strip()
+
+        meeting = _fmt_date10(r.get("meeting_date") or "")
+        last_comm = _fmt_date10(r.get("last_communication") or r.get("last_note_ts") or r.get("last_touch") or "")
+
+        header = f"{i}) {name}"
+        if company:
+            header += f" — {company}"
+        lines.append(header)
+
+        if email:
+            lines.append(f"   Email: {email}")
+        if prof:
+            lines.append(f"   Profile: {prof}")
+
+        bits: List[str] = []
+        if status:
+            bits.append(f"Status: {status}")
+        if owner:
+            bits.append(f"Owner: {owner}")
+        if meeting:
+            bits.append(f"Meeting: {meeting}")
+        if last_comm:
+            bits.append(f"Last comm: {last_comm}")
+        if product:
+            bits.append(f"Product: {product}")
+        if app:
+            bits.append(f"Application: {app}")
+
+        if bits:
+            lines.append("   " + " | ".join(bits))
+        lines.append("")
+
+    lines.append("Thanks!")
+    lines.append("— Radom CRM")
+    return "
+".join(lines).strip()
+
+def mailto_link(to_email: str, subject: str, body: str) -> str:
+    return f"mailto:{to_email}?subject={quote(subject)}&body={quote(body)}"
 
 
 # -------------------------------------------------------------
@@ -2933,6 +3010,94 @@ def main():
         ].fillna("")
 
         st.dataframe(view, use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader("📧 Ask teammate to follow up")
+
+        if df.empty:
+            st.caption("No contacts in current filter.")
+        else:
+            df_email = df.copy()
+
+            # Ensure expected columns exist
+            for col in [
+                "first_name",
+                "last_name",
+                "company",
+                "email",
+                "status",
+                "owner",
+                "application",
+                "product_interest",
+                "profile_url",
+                "meeting_date",
+                "last_communication",
+                "last_touch",
+                "last_note_ts",
+            ]:
+                if col not in df_email.columns:
+                    df_email[col] = ""
+
+            df_email["id"] = safe_int_series(df_email["id"], 0)
+
+            df_email["label"] = (
+                df_email["id"].astype(str)
+                + " — "
+                + df_email["first_name"].fillna("").astype(str)
+                + " "
+                + df_email["last_name"].fillna("").astype(str)
+                + " — "
+                + df_email["company"].fillna("").astype(str)
+            ).str.strip()
+
+            id_to_label = dict(zip(df_email["id"].tolist(), df_email["label"].tolist()))
+
+            cfu1, cfu2 = st.columns([2.2, 1.2])
+            with cfu1:
+                picked_ids = st.multiselect(
+                    "Select one or more contacts (from current filter)",
+                    options=list(id_to_label.keys()),
+                    format_func=lambda cid: id_to_label.get(int(cid), str(cid)),
+                )
+            with cfu2:
+                recipient_name = st.selectbox("Send to", list(FOLLOWUP_RECIPIENTS.keys()), index=0)
+
+            if picked_ids:
+                picked_ids_int = [int(x) for x in picked_ids]
+                sub_df = df_email[df_email["id"].isin(picked_ids_int)].copy()
+
+                subject = f"Radom CRM follow-up: {len(sub_df)} lead(s)"
+                body = build_followup_email_body(
+                    sub_df[
+                        [
+                            "first_name",
+                            "last_name",
+                            "company",
+                            "email",
+                            "profile_url",
+                            "status",
+                            "owner",
+                            "product_interest",
+                            "application",
+                            "meeting_date",
+                            "last_communication",
+                            "last_note_ts",
+                            "last_touch",
+                        ]
+                    ].fillna("")
+                )
+
+                link = mailto_link(FOLLOWUP_RECIPIENTS[recipient_name], subject, body)
+
+                st.markdown(
+                    f"""<a href='{link}' style='text-decoration:none;'>
+                    <button style='padding:10px 14px;border-radius:10px;border:0;
+                    background:#5a22ff;color:white;font-weight:700;cursor:pointer;'>
+                    📧 Ask {recipient_name} to follow up</button></a>""",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.caption("Pick at least one contact to generate an email draft.")
+
 
         options = {
             int(r.id): f"{(r.first_name or '')} {(r.last_name or '')} — {r.company or ''} ({r.email or ''})"
