@@ -70,11 +70,11 @@ PIPELINE = [
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin", "Annie"]
 
 FOLLOWUP_RECIPIENTS = {
-    \"Velibor\": \"vpikelja@radomcorp.com\",
-    \"Jovan\": \"jjevtic@radomcorp.com\",
-    \"Ian\": \"imckinney@radomcorp.com\",
-    \"Annie\": \"aminga@radomcorp.com\",
-    \"Liz\": \"egrushnikova@radomcorp.com\",
+    "Velibor": "vpikelja@radomcorp.com",
+    "Jovan": "jjevtic@radomcorp.com",
+    "Ian": "imckinney@radomcorp.com",
+    "Annie": "aminga@radomcorp.com",
+    "Liz": "egrushnikova@radomcorp.com",
 }
 
 # -------------------------------------------------------------
@@ -3128,6 +3128,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
