@@ -584,10 +584,93 @@ def build_followup_email_body(df: pd.DataFrame) -> str:
 
     return "\n".join(lines).strip()
 
-def mailto_link(to_email: str, subject: str, body: str, cc_email: Optional[str] = None) -> str:
+def build_direct_followup_email_body(row: Dict[str, Any]) -> str:
+    """Build an email body that goes directly to the lead."""
+    first = (row.get("first_name") or "").strip()
+    last = (row.get("last_name") or "").strip()
+    name = (f"{first} {last}".strip()) or "there"
+    company = (row.get("company") or "").strip()
+    product = (row.get("product_interest") or "").strip()
+    application = (row.get("application") or "").strip()
+    status = (row.get("status") or "").strip()
+    last_comm = (row.get("last_contact") or row.get("last_communication") or row.get("last_touch") or row.get("last_note_ts") or "").strip()
+    last_comm_10 = last_comm[:10] if last_comm else ""
+
+    lines = []
+    lines.append(f"Hi {name},")
+    lines.append("")
+    lines.append("I hope you’re doing well.")
+    lines.append("")
+
+    if company:
+        lines.append(f"I’m following up regarding Radom’s plasma torch solutions and our discussion with {company}.")
+    else:
+        lines.append("I’m following up regarding Radom’s plasma torch solutions and our prior discussion.")
+
+    if product or application:
+        bits = []
+        if product:
+            bits.append(f"your interest in {product}")
+        if application:
+            bits.append(f"the application: {application}")
+        lines.append(f"In particular, I wanted to follow up about {', '.join(bits)}.")
+    lines.append("")
+
+    if last_comm_10:
+        lines.append(f"Our last communication was on {last_comm_10}.")
+        lines.append("")
+
+    if status.lower() == "quoted":
+        lines.append("Could you please share any feedback on the quote (or let us know if anything needs to be adjusted)?")
+    else:
+        lines.append("Do you have any feedback or next steps in mind from your side?")
+    lines.append("")
+    lines.append("Thank you,")
+    lines.append("Radom Team")
+    return "\n".join(lines).strip()
+
+
+def _safe_days_since(iso_or_date: str) -> Optional[int]:
+    s = (iso_or_date or "").strip()
+    if not s:
+        return None
+    try:
+        dt = dtparser.parse(s)
+        return (datetime.utcnow().date() - dt.date()).days
+    except Exception:
+        return None
+
+
+def compute_last_contact_fields(row: Dict[str, Any]) -> Tuple[str, Optional[int]]:
+    """Return (last_contact_iso_or_date, days_since) from last_note_ts/last_touch/last_communication."""
+    candidates = []
+    for k in ("last_note_ts", "last_touch", "last_communication"):
+        v = (row.get(k) or "").strip() if isinstance(row.get(k), str) else ("" if row.get(k) is None else str(row.get(k)).strip())
+        if v:
+            try:
+                candidates.append(dtparser.parse(v))
+            except Exception:
+                pass
+    if not candidates:
+        return "", None
+    best = max(candidates)
+    iso = best.isoformat()
+    days = (datetime.utcnow().date() - best.date()).days
+    return iso, int(days)
+
+
+def mailto_link(
+    to_email: str,
+    subject: str,
+    body: str,
+    cc_email: Optional[str] = None,
+    bcc_email: Optional[str] = None,
+) -> str:
     qs = [f"subject={quote(subject)}", f"body={quote(body)}"]
     if cc_email:
         qs.insert(0, f"cc={quote(cc_email)}")
+    if bcc_email:
+        qs.insert(0, f"bcc={quote(bcc_email)}")
     return f"mailto:{to_email}?" + "&".join(qs)
 
 
@@ -1511,7 +1594,7 @@ def upsert_contacts(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                     )
 
                     # update last communication timestamp
-                    cur.execute("UPDATE contacts SET last_communication=? WHERE id=?", (ts_iso, contact_id))
+                    cur.execute("UPDATE contacts SET last_communication=?, last_touch=? WHERE id=?", (ts_iso, ts_iso, contact_id))
 
             # ✅ IMPORTANT: import sales (if present in the uploaded CSV/export)
             sales_rows = _extract_sales_rows_from_import(r)
@@ -2189,14 +2272,58 @@ def _render_lead_list(title_html: str, df: pd.DataFrame, mode: str):
             else ""
         )
 
+        # --- direct follow-up email (lead) + overdue highlighting (21+ days) ---
+        last_contact_iso, days_since = compute_last_contact_fields(
+            {
+                "last_note_ts": str(sub.get("last_note_ts") or ""),
+                "last_touch": str(sub.get("last_touch") or ""),
+                "last_communication": str(sub.get("last_communication") or ""),
+            }
+        )
+        # If precomputed days are provided (e.g., from Overview), prefer them
+        try:
+            days_since = int(sub.get("days_since_contact")) if str(sub.get("days_since_contact") or "").strip() != "" else days_since
+        except Exception:
+            pass
+
+        overdue = (days_since is not None) and (int(days_since) > 21)
+        row_style = "background:rgba(255, 99, 99, 0.10); border-left:4px solid rgba(255, 99, 99, 0.7); padding-left:8px;" if overdue else ""
+
+        lead_mailto = ""
+        lead_html = lead
+        mail_icon_html = ""
+        if email:
+            body_direct = build_direct_followup_email_body(
+                {
+                    "first_name": first,
+                    "last_name": last,
+                    "company": company,
+                    "product_interest": product,
+                    "application": application,
+                    "status": status,
+                    "last_contact": (last_contact_iso or last_comm or ""),
+                    "last_note_ts": str(sub.get("last_note_ts") or ""),
+                    "last_touch": str(sub.get("last_touch") or ""),
+                    "last_communication": str(sub.get("last_communication") or ""),
+                }
+            )
+            lead_mailto = mailto_link(
+                email,
+                "Follow up about Radom plasma torch",
+                body_direct,
+                bcc_email=FOLLOWUP_CC,
+            )
+            lead_html = f"<a href='{lead_mailto}' style='text-decoration:none;color:inherit;'>{lead}</a>"
+            mail_icon_html = f"<a href='{lead_mailto}' title='Email lead' style='text-decoration:none;margin-left:6px;'>✉️</a>"
+
         rows_html.append(
             f"""
-        <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.06);">
+        <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.06);{row_style}">
           <div style="flex:0 0 auto;margin-top:2px;">{profile_icon_html}</div>
           <div style="flex:1 1 auto;min-width:0;">
             <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
               <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                {lead} {flag}
+                {lead_html} {flag} {mail_icon_html}
               </div>
               <div style="flex:0 0 auto;">{status_badge}</div>
             </div>
@@ -2231,6 +2358,22 @@ def show_priority_lists(conn: sqlite3.Connection):
         st.caption("No contacts yet – add someone manually or import a file.")
         return
 
+    # -------------------------------------------------------------
+    # Compute last_contact + days_since_contact for highlighting (uses notes/last_touch/last_communication)
+    def _best_contact_iso(row: pd.Series) -> Tuple[str, Optional[int]]:
+        last_contact_iso, days = compute_last_contact_fields(
+            {
+                "last_note_ts": str(row.get("last_note_ts") or ""),
+                "last_touch": str(row.get("last_touch") or ""),
+                "last_communication": str(row.get("last_communication") or ""),
+            }
+        )
+        return last_contact_iso, days
+
+    tmp = df_all.apply(_best_contact_iso, axis=1, result_type="expand")
+    df_all["last_contact"] = tmp[0].fillna("")
+    df_all["days_since_contact"] = tmp[1]
+    # ----------------------------------------------------------------
 
     # -------------------------------------------------------------
     # Follow-up email helper (from Overview)
@@ -3076,6 +3219,22 @@ def main():
         df = query_contacts(conn, q, cats, stats, st_like, app_filter, prod_filter)
 
         st.caption(f"Filtered results: **{len(df)}**")
+        # Add last_contact + days_since_contact for highlighting/visibility
+        if not df.empty:
+            tmp = df.apply(
+                lambda r: compute_last_contact_fields(
+                    {
+                        "last_note_ts": str(r.get("last_note_ts") or ""),
+                        "last_touch": str(r.get("last_touch") or ""),
+                        "last_communication": str(r.get("last_communication") or ""),
+                    }
+                ),
+                axis=1,
+                result_type="expand",
+            )
+            df["last_contact"] = tmp[0].fillna("")
+            df["days_since_contact"] = tmp[1]
+
 
         export_df = build_export_df(conn, df)
         st.session_state["export_df"] = export_df
@@ -3096,6 +3255,8 @@ def main():
             "application",
             "product_interest",
             "last_note_ts",
+            "last_contact",
+            "days_since_contact",
         ]:
             if c not in view.columns:
                 view[c] = ""
@@ -3110,11 +3271,24 @@ def main():
                 "owner",
                 "application",
                 "product_interest",
+                "last_contact",
+                "days_since_contact",
                 "last_note_ts",
             ]
         ].fillna("")
 
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        def _style_overdue(row: pd.Series):
+            try:
+                days = row.get("days_since_contact", "")
+                if days == "" or days is None:
+                    return [""] * len(row)
+                if int(float(days)) > 21:
+                    return ["background-color: rgba(255, 99, 99, 0.18)"] * len(row)
+            except Exception:
+                pass
+            return [""] * len(row)
+
+        st.dataframe(view.style.apply(_style_overdue, axis=1), use_container_width=True, hide_index=True)
         st.markdown("---")
         st.subheader("📧 Ask teammate to follow up")
 
