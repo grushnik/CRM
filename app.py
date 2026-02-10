@@ -2533,7 +2533,7 @@ def show_priority_lists(conn: sqlite3.Connection):
         header = f"""
             <div style="background-color:#ff6b6b;padding:6px 10px;border-radius:10px;
                         font-weight:700;color:white;text-align:center;margin-bottom:6px;">
-                🔥 Hot customers ({len(hot_raw)}) — Meeting / Quoted
+                Quoted / Meeting with ({len(hot_raw)})
             </div>
         """
         _render_lead_list(header, hot_raw, mode="hot")
@@ -3407,6 +3407,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
