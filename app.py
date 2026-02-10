@@ -2515,7 +2515,7 @@ def show_priority_lists(conn: sqlite3.Connection):
         header = f"""
             <div style="background-color:#28a745;padding:6px 10px;border-radius:10px;
                         font-weight:700;color:white;text-align:center;margin-bottom:6px;">
-                🟢 New customers ({len(new_raw)}) — New
+                New customers ({len(new_raw)}) — New
             </div>
         """
         _render_lead_list(header, new_raw, mode="new")
@@ -2524,7 +2524,7 @@ def show_priority_lists(conn: sqlite3.Connection):
         header = f"""
             <div style="background-color:#007bff;padding:6px 10px;border-radius:10px;
                         font-weight:700;color:white;text-align:center;margin-bottom:6px;">
-                🔵 Potential sales ({len(pot_raw)}) — Contacted
+                Potential sales ({len(pot_raw)}) — Contacted
             </div>
         """
         _render_lead_list(header, pot_raw, mode="potential")
@@ -3407,6 +3407,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
