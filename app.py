@@ -29,58 +29,57 @@ OTP_TTL_SECONDS = 300  # 5 minutes
 
 APPLICATIONS = sorted(
     [
-"PFAS destruction",
-        "CO2 conversion",
-        "Waste-to-Energy",
-        "NOx production",
-        "Hydrogen production",
-        "Carbon black production",
-        "Mining waste",
-        "Reentry",
-        "Propulsion",
-        "Methane reforming",
-        "Communication",
-        "Ultrasonic",
-        "Nitrification",
-        "Surface treatment",
-        "Oblation",
-        "Educational purpose",
-        "Material processing",
-        "Etching",
-        "Coating",
-        "Spraying",
-        "Sterilization",
-        "Powder injection",
-
-        "Cement production",
-        "Collaboration",
-        "General research",
-        "Distributor",
-        "Glass treatment",
-        "Orbit Manufacturing",
-        "Optics characterization",
-        "Source of heat",
+        "Acquiring a quote",
         "Aerospace",
         "Battery recycling",
+        "Carbon black production",
+        "Cement production",
         "Chemical manufacturing",
-        "Lime production",
-        "Metal oxides reduction",
-        # Added 2026-02: expanded applications
-        "Metal evaporation",
-        "Joint proposal",
+        "CO2 conversion",
+        "Coating",
+        "Collaboration",
+        "Combustion replacement",
+        "Communication",
+        "Distributor",
+        "Educational purpose",
+        "Etching",
+        "General research",
+        "Glass treatment",
         "Grant",
+        "Hydrogen production",
+        "Joint proposal",
+        "Lime production",
+        "Marketing research",
+        "Material processing",
+        "Metal evaporation",
+        "Metal oxides reduction",
+        "Methane reforming",
+        "Mining waste",
+        "Modeling plasma parameters",
+        "Nitrification",
+        "NOx production",
+        "Oblation",
+        "Optics characterization",
+        "Orbit Manufacturing",
+        "Ore upgrading",
         "Partnership",
+        "PFAS destruction",
+        "Plasma diagnostic",
+        "Powder injection",
+        "Propulsion",
+        "Reduction chemistry",
+        "Reentry",
+        "Self education",
+        "Source of heat",
+        "Spectroscopy",
+        "Spraying",
+        "Sterilization",
+        "Surface treatment",
         "Syngas cleaning",
         "Syngas production",
-        "Plasma diagnostic",
-        "Spectroscopy",
-        "Modeling plasma parameters",
-        "Reduction chemistry",
-        "Ore upgrading",
-        "Combustion replacement",
         "Technical support request",
-        "Self education",
-
+        "Ultrasonic",
+        "Waste-to-Energy",
     ]
 )
 PRODUCTS = ["1 kW", "1.5 kW", "10 kW", "100 kW", "1 MW"]
@@ -1314,9 +1313,13 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Combustion replacement"
     if "metal" in s and "evapor" in s:
         return "Metal evaporation"
+    # Added 2026-02: lead-source / sales-process applications
+    if "marketing" in s and "research" in s:
+        return "Marketing research"
+    if "quote" in s or "pricing" in s or "cost estimate" in s or "budget" in s:
+        return "Acquiring a quote"
 
     return None
-
 
 def _fix_header_row_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     cols_lower = [str(c).strip().lower() for c in df.columns]
