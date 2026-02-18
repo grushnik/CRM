@@ -15,6 +15,21 @@ from dateutil import parser as dtparser
 import requests
 
 # -------------------------------------------------------------
+# Email-thread trimming markers used by sanitize_note_text
+# -------------------------------------------------------------
+_EMAIL_THREAD_MARKERS = (
+    "\nFrom:",
+    "\nSent:",
+    "\nTo:",
+    "\nCc:",
+    "\nSubject:",
+    "\n-----Original Message-----",
+    "\n________________________________",
+    "\nOn ",  # covers many clients; regex also handles "On ... wrote:"
+)
+
+
+# -------------------------------------------------------------
 # BASIC CONFIG
 # -------------------------------------------------------------
 APP_TITLE = "Radom CRM"
@@ -221,7 +236,7 @@ def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int 
     s = s.replace("\r\n", "\n").replace("\r", "\n")
 
     if trim_email_threads:
-        for marker in _EMAIL_THREAD_MARKERS:
+        for marker in globals().get('_EMAIL_THREAD_MARKERS', ()): 
             if marker in s:
                 s = s.split(marker)[0]
                 break
@@ -3511,7 +3526,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 
