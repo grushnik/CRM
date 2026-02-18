@@ -80,6 +80,9 @@ APPLICATIONS = sorted(
         "Technical support request",
         "Ultrasonic",
         "Waste-to-Energy",
+    "Consulting",
+    "Job application",
+
     ]
 )
 PRODUCTS = ["1 kW", "1.5 kW", "10 kW", "100 kW", "1 MW"]
@@ -127,84 +130,88 @@ def clear_keys(keys: List[str]):
         st.session_state.pop(k, None)
 
 
-def parse_website_request_blob(text: str) -> Dict[str, Any]:
-    """Parse pasted Radom website request blob (Key: value per line).
-
-    Expected keys include (case-insensitive):
-      request-fullname, request-company, request-email, request-usecase
-    Also captures any '*Brochure' / '*White Paper' items set to true/yes/1.
-    Returns normalized fields plus a rendered note string.
+def parse_website_request_blob(blob: str) -> Dict[str, str]:
     """
-    raw = (text or "").strip()
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    Parse a "key: value" blob pasted from the website forms.
 
+    Supports BOTH formats:
+      #1 Literature request (request-*)
+      #2 Contact form (contact-*)
+
+    Returns a normalized dict with keys:
+      first_name, last_name, company, email, application_raw, note, phone
+    """
     kv: Dict[str, str] = {}
-    for ln in lines:
-        if ":" not in ln:
+    for raw in (blob or "").splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
             continue
-        k, v = ln.split(":", 1)
-        kv[k.strip().lower()] = v.strip()
+        k, v = line.split(":", 1)
+        kv[k.strip()] = v.strip()
 
-    fullname = kv.get("request-fullname", "") or kv.get("fullname", "")
-    company = kv.get("request-company", "") or kv.get("company", "")
-    email = kv.get("request-email", "") or kv.get("email", "")
-    usecase = kv.get("request-usecase", "") or kv.get("usecase", "")
+    is_contact = any(k.startswith("contact-") for k in kv.keys())
+    is_request = any(k.startswith("request-") for k in kv.keys())
 
-    # Split fullname -> first/last (simple heuristic)
-    parts = [p for p in re.split(r"\s+", fullname.strip()) if p]
-    first_name = parts[0] if parts else ""
-    last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
-
-    # Requested assets (brochures / white papers)
-    requested_labels: List[str] = []
-    for k, v in kv.items():
-        if any(x in k for x in ["brochure", "white paper", "whitepaper"]):
-            val = (v or "").strip().lower()
-            truthy = val in ("true", "yes", "1", "on")
-            if truthy:
-                # keep original-ish label (capitalize nicely)
-                label = k.replace("whitepaper", "white paper")
-                # preserve known acronyms
-                words = []
-                for w in re.split(r"\s+", label.replace("-", " ")):
-                    if w.upper() in ("PFAS", "NOX", "CO2"):
-                        words.append(w.upper() if w.upper() != "NOX" else "NOx")
-                    else:
-                        words.append(w.capitalize())
-                requested_labels.append(" ".join(words))
+    def truthy(x: str) -> bool:
+        return str(x).strip().lower() in {"true", "1", "yes", "y", "on", "checked"}
 
     note_lines: List[str] = []
-    if requested_labels:
-        note_lines.append("Website literature request:")
-        for r in requested_labels:
-            note_lines.append(f"- {r}")
-    if usecase.strip():
-        note_lines.append(f"Use case (from website): {usecase.strip()}")
-    if raw:
-        note_lines.append("")
-        note_lines.append("Raw website submission:")
-        note_lines.append(raw)
+    phone = ""
+
+    if is_contact and not is_request:
+        first = kv.get("contact-first-name", "").strip()
+        last = kv.get("contact-last-name", "").strip()
+        email = kv.get("contact-email", "").strip()
+        phone_or_company = kv.get("contact-phone", "").strip()
+        message = kv.get("contact-message", "").strip()
+
+        digit_count = sum(ch.isdigit() for ch in phone_or_company)
+        if phone_or_company and digit_count >= 3:
+            phone = phone_or_company
+            company = kv.get("contact-company", "").strip()
+        else:
+            company = kv.get("contact-company", "").strip() or phone_or_company
+
+        if message:
+            note_lines.append(message)
+
+        if "contact-checkbox" in kv:
+            note_lines.append(f"contact-checkbox: {kv.get('contact-checkbox', '').strip()}")
+
+        application_raw = message
+
+    else:
+        full = kv.get("request-fullname", "").strip()
+        parts = [p for p in re.split(r"\s+", full) if p]
+        first = parts[0] if parts else ""
+        last = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+        company = kv.get("request-company", "").strip()
+        email = kv.get("request-email", "").strip()
+        application_raw = kv.get("request-usecase", "").strip()
+
+        for k, v in kv.items():
+            if k.startswith("request-"):
+                continue
+            if k.lower().endswith("brochure") or "white paper" in k.lower() or "whitepaper" in k.lower():
+                note_lines.append(f"{k}: {v}")
+
+        for k, v in kv.items():
+            if k.lower().endswith("checkbox"):
+                if truthy(v) or v:
+                    note_lines.append(f"{k}: {v}")
+
+    note = "\n".join([ln for ln in note_lines if ln]).strip()
 
     return {
-        "first_name": first_name.strip(),
-        "last_name": last_name.strip(),
-        "company": company.strip(),
-        "email": email.strip(),
-        "application_raw": usecase.strip(),
-        "note": "\n".join(note_lines).strip(),
+        "first_name": first,
+        "last_name": last,
+        "company": company,
+        "email": email,
+        "application_raw": application_raw,
+        "note": note,
+        "phone": phone,
     }
-
-# -------------------------------------------------------------
-# NOTES IMPORT sanitize + trim email threads
-# -------------------------------------------------------------
-_EMAIL_THREAD_MARKERS = (
-    "\nOn ",
-    "\nFrom:",
-    "\nSent:",
-    "\nSubject:",
-    "\nTo:",
-    "\nCc:",
-)
 
 
 def sanitize_note_text(v: Any, *, trim_email_threads: bool = True, max_len: int = 4000) -> str:
