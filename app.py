@@ -52,6 +52,14 @@ APPLICATIONS = sorted(
         "Sterilization",
         "Powder injection",
 
+        "Cement production",
+        "Collaboration",
+        "General research",
+        "Distributor",
+        "Glass treatment",
+        "Orbit Manufacturing",
+        "Optics characterization",
+
     ]
 )
 
@@ -1221,6 +1229,22 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Sterilization"
     if "powder" in s and ("inject" in s or "injection" in s):
         return "Powder injection"
+
+    # Added 2026-02: more CRM application categories
+    if "cement" in s:
+        return "Cement production"
+    if "collab" in s or "collaboration" in s or "partner" in s or "partnership" in s:
+        return "Collaboration"
+    if "general research" in s or ("research" in s and "optics" not in s):
+        return "General research"
+    if "distributor" in s or "distribution" in s or "reseller" in s or "agent" in s:
+        return "Distributor"
+    if "glass" in s and ("treat" in s or "treatment" in s or "surface" in s):
+        return "Glass treatment"
+    if "orbit manufacturing" in s or (s == "orbit") or ("orbit" in s and "reentry" not in s):
+        return "Orbit Manufacturing"
+    if "optics" in s or "optical" in s or "characterization" in s:
+        return "Optics characterization"
     return None
 
 
@@ -3407,6 +3431,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
