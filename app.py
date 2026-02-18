@@ -59,6 +59,13 @@ APPLICATIONS = sorted(
         "Glass treatment",
         "Orbit Manufacturing",
         "Optics characterization",
+        "Source of heat",
+        "Aerospace",
+        "Battery recycling",
+        "Chemical manufacturing",
+        "Lime production",
+        "Metal oxides reduction",
+
 
     ]
 )
@@ -1245,6 +1252,19 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Orbit Manufacturing"
     if "optics" in s or "optical" in s or "characterization" in s:
         return "Optics characterization"
+    # Added 2026-02: additional industry applications
+    if "heat" in s and ("source" in s or "process" in s or "thermal" in s or s == "heat"):
+        return "Source of heat"
+    if "aerospace" in s or "space" in s or "aviation" in s or "satellite" in s:
+        return "Aerospace"
+    if "battery" in s and ("recycl" in s or "recycling" in s or "recycle" in s):
+        return "Battery recycling"
+    if "chemical" in s and ("manufact" in s or "manufacturing" in s or "production" in s):
+        return "Chemical manufacturing"
+    if "lime" in s or "quicklime" in s or "cao" in s or "limestone" in s:
+        return "Lime production"
+    if ("metal" in s or "oxide" in s) and ("reduc" in s or "reduction" in s):
+        return "Metal oxides reduction"
     return None
 
 
