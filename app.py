@@ -29,7 +29,7 @@ OTP_TTL_SECONDS = 300  # 5 minutes
 
 APPLICATIONS = sorted(
     [
-        "PFAS destruction",
+"PFAS destruction",
         "CO2 conversion",
         "Waste-to-Energy",
         "NOx production",
@@ -65,11 +65,24 @@ APPLICATIONS = sorted(
         "Chemical manufacturing",
         "Lime production",
         "Metal oxides reduction",
-
+        # Added 2026-02: expanded applications
+        "Metal evaporation",
+        "Joint proposal",
+        "Grant",
+        "Partnership",
+        "Syngas cleaning",
+        "Syngas production",
+        "Plasma diagnostic",
+        "Spectroscopy",
+        "Modeling plasma parameters",
+        "Reduction chemistry",
+        "Ore upgrading",
+        "Combustion replacement",
+        "Technical support request",
+        "Self education",
 
     ]
 )
-
 PRODUCTS = ["1 kW", "1.5 kW", "10 kW", "100 kW", "1 MW"]
 
 PIPELINE = [
@@ -78,10 +91,10 @@ PIPELINE = [
     "Meeting",
     "Quoted",
     "Won",
+    "Spam",
     "Irrelevant",
     "On hold",
 ]
-
 OWNERS = ["", "Velibor", "Liz", "Jovan", "Ian", "Qi", "Kenshin", "Annie"]
 
 FOLLOWUP_RECIPIENTS = {
@@ -1177,6 +1190,12 @@ def normalize_status(val: Any) -> Optional[str]:
         "irrelevant lead": "Irrelevant",
         "hold": "On hold",
         "onhold": "On hold",
+        "spam": "Spam",
+        "junk": "Spam",
+        "trash": "Spam",
+        "newsletter": "Spam",
+        "auto": "Spam",
+
     }
     v = synonyms.get(s)
     return v if v in PIPELINE else None
@@ -1265,6 +1284,37 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Lime production"
     if ("metal" in s or "oxide" in s) and ("reduc" in s or "reduction" in s):
         return "Metal oxides reduction"
+    
+    # Added 2026-02: additional application mappings
+    if "self education" in s or "self-education" in s:
+        return "Self education"
+    if "technical support" in s or ("support" in s and "request" in s) or "help with" in s:
+        return "Technical support request"
+    if "joint proposal" in s or ("joint" in s and "proposal" in s):
+        return "Joint proposal"
+    if "grant" in s or "funding" in s:
+        return "Grant"
+    if "partnership" in s:
+        return "Partnership"
+    if "syngas" in s and ("clean" in s or "cleanup" in s or "scrub" in s or "purif" in s):
+        return "Syngas cleaning"
+    if "syngas" in s:
+        return "Syngas production"
+    if "diagnostic" in s and "plasma" in s:
+        return "Plasma diagnostic"
+    if "spectros" in s:
+        return "Spectroscopy"
+    if ("model" in s or "simulation" in s) and ("plasma" in s or "parameter" in s):
+        return "Modeling plasma parameters"
+    if "reduction chemistry" in s or ("reduction" in s and "chem" in s):
+        return "Reduction chemistry"
+    if "ore" in s and ("upgrad" in s or "benefici" in s or "upgrade" in s):
+        return "Ore upgrading"
+    if "combustion" in s and ("replace" in s or "replacement" in s):
+        return "Combustion replacement"
+    if "metal" in s and "evapor" in s:
+        return "Metal evaporation"
+
     return None
 
 
@@ -3451,7 +3501,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 
