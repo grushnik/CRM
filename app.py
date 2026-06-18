@@ -4,6 +4,7 @@ import sqlite3
 import random
 import time
 import csv
+import base64
 from datetime import datetime, date
 from typing import List, Any, Optional, Dict, Tuple
 from urllib.parse import quote
@@ -38,6 +39,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_FILE = os.path.join(DATA_DIR, "radom_crm.db")
 BACKUP_FILE = os.path.join(DATA_DIR, "contacts_backup.csv")
+REMOTE_BACKUP_PATH_DEFAULT = "data/contacts_backup.csv"
+REMOTE_FORM_QUEUE_PATH_DEFAULT = "data/incoming_forms"
 
 DEFAULT_PASSWORD = "CatJorge"
 OTP_TTL_SECONDS = 300  # 5 minutes
@@ -123,6 +126,173 @@ FOLLOWUP_RECIPIENTS = {
 }
 
 FOLLOWUP_CC = "radom@radomcorp.com"
+
+
+# -------------------------------------------------------------
+# OPTIONAL REMOTE BACKUP (GITHUB CONTENTS API)
+# -------------------------------------------------------------
+def _secret_lookup(path: str) -> Optional[str]:
+    """Read a nested Streamlit secret like 'github_backup.token' if present."""
+    try:
+        cur: Any = st.secrets
+        for part in path.split("."):
+            if hasattr(cur, "get"):
+                cur = cur.get(part)
+            else:
+                cur = cur[part]
+            if cur is None:
+                return None
+        val = str(cur).strip()
+        return val or None
+    except Exception:
+        return None
+
+
+def _github_backup_config() -> Dict[str, str]:
+    token = (
+        _secret_lookup("github_backup.token")
+        or os.getenv("GITHUB_BACKUP_TOKEN")
+        or os.getenv("GITHUB_TOKEN")
+        or ""
+    ).strip()
+    repo = (_secret_lookup("github_backup.repo") or os.getenv("GITHUB_BACKUP_REPO") or "grushnik/CRM").strip()
+    branch = (_secret_lookup("github_backup.branch") or os.getenv("GITHUB_BACKUP_BRANCH") or "main").strip()
+    path = (
+        _secret_lookup("github_backup.path")
+        or os.getenv("GITHUB_BACKUP_PATH")
+        or REMOTE_BACKUP_PATH_DEFAULT
+    ).strip()
+    form_queue_path = (
+        _secret_lookup("github_backup.form_queue_path")
+        or os.getenv("GITHUB_FORM_QUEUE_PATH")
+        or REMOTE_FORM_QUEUE_PATH_DEFAULT
+    ).strip()
+    return {
+        "token": token,
+        "repo": repo,
+        "branch": branch,
+        "path": path,
+        "form_queue_path": form_queue_path,
+    }
+
+
+def github_backup_enabled() -> bool:
+    cfg = _github_backup_config()
+    return bool(cfg["token"] and cfg["repo"] and cfg["branch"] and cfg["path"])
+
+
+def _github_contents_url(repo: str, path: str) -> str:
+    return f"https://api.github.com/repos/{repo}/contents/{quote(path.lstrip('/'), safe='/')}"
+
+
+def _github_headers() -> Dict[str, str]:
+    cfg = _github_backup_config()
+    return {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "radom-crm-streamlit",
+    }
+
+
+def _github_get_file(path: str) -> Tuple[Optional[bytes], Optional[str]]:
+    cfg = _github_backup_config()
+    if not github_backup_enabled():
+        return None, None
+
+    resp = requests.get(
+        _github_contents_url(cfg["repo"], path),
+        headers=_github_headers(),
+        params={"ref": cfg["branch"]},
+        timeout=20,
+    )
+    if resp.status_code == 404:
+        return None, None
+    resp.raise_for_status()
+
+    payload = resp.json()
+    content = base64.b64decode((payload.get("content") or "").encode("utf-8"))
+    return content, payload.get("sha")
+
+
+def fetch_remote_backup_to_file() -> bool:
+    cfg = _github_backup_config()
+    if not github_backup_enabled():
+        return False
+    try:
+        content, _sha = _github_get_file(cfg["path"])
+        if not content:
+            return False
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(BACKUP_FILE, "wb") as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        print(f"Remote backup download failed: {e}")
+        return False
+
+
+def push_backup_to_github(csv_bytes: bytes) -> bool:
+    cfg = _github_backup_config()
+    if not github_backup_enabled() or not csv_bytes:
+        return False
+
+    try:
+        _old_content, sha = _github_get_file(cfg["path"])
+        payload = {
+            "message": f"Update CRM backup {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
+            "content": base64.b64encode(csv_bytes).decode("utf-8"),
+            "branch": cfg["branch"],
+        }
+        if sha:
+            payload["sha"] = sha
+
+        resp = requests.put(
+            _github_contents_url(cfg["repo"], cfg["path"]),
+            headers=_github_headers(),
+            json=payload,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"Remote backup upload failed: {e}")
+        return False
+
+
+def _github_list_dir(path: str) -> List[Dict[str, Any]]:
+    cfg = _github_backup_config()
+    if not github_backup_enabled():
+        return []
+    resp = requests.get(
+        _github_contents_url(cfg["repo"], path),
+        headers=_github_headers(),
+        params={"ref": cfg["branch"]},
+        timeout=20,
+    )
+    if resp.status_code == 404:
+        return []
+    resp.raise_for_status()
+    payload = resp.json()
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        return [payload]
+    return []
+
+
+def _github_delete_file(path: str, sha: str, message: str) -> bool:
+    cfg = _github_backup_config()
+    if not github_backup_enabled() or not sha:
+        return False
+    resp = requests.delete(
+        _github_contents_url(cfg["repo"], path),
+        headers=_github_headers(),
+        json={"message": message, "sha": sha, "branch": cfg["branch"]},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return True
+
 
 # -------------------------------------------------------------
 # dtype-safe numeric helpers
@@ -949,14 +1119,23 @@ def check_login_two_factor_telegram():
 def backup_contacts(conn: sqlite3.Connection):
     df = pd.read_sql_query("SELECT * FROM contacts", conn)
     if not df.empty:
+        try:
+            df = build_export_df(conn, df)
+        except Exception as e:
+            print(f"Full backup export failed; saving contacts only: {e}")
         os.makedirs(DATA_DIR, exist_ok=True)
-        df.to_csv(BACKUP_FILE, index=False)
+        csv_bytes = df.to_csv(index=False, quoting=csv.QUOTE_ALL).encode("utf-8")
+        with open(BACKUP_FILE, "wb") as f:
+            f.write(csv_bytes)
+        push_backup_to_github(csv_bytes)
 
 
 def restore_from_backup_if_empty(conn: sqlite3.Connection):
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM contacts")
     n = cur.fetchone()[0]
+    if n == 0 and not os.path.exists(BACKUP_FILE):
+        fetch_remote_backup_to_file()
     if n == 0 and os.path.exists(BACKUP_FILE):
         try:
             df = pd.read_csv(BACKUP_FILE)
@@ -1266,6 +1445,8 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Educational purpose"
     if "material" in s and "process" in s:
         return "Material processing"
+    if "solder" in s or "braz" in s or "weld" in s:
+        return "Material processing"
     if "etch" in s:
         return "Etching"
     if "coat" in s:
@@ -1340,6 +1521,8 @@ def normalize_application(val: Any) -> Optional[str]:
         return "Marketing research"
     if "quote" in s or "pricing" in s or "cost estimate" in s or "budget" in s:
         return "Acquiring a quote"
+    if "job" in s or "career" in s or "cv" in s or "resume" in s or "opening" in s:
+        return "Job application"
 
     return None
 
@@ -1878,6 +2061,173 @@ def create_contact(conn: sqlite3.Connection, data: Dict[str, Any]) -> int:
     ensure_dedupe_index(conn)
     backup_contacts(conn)
     return new_id
+
+
+def create_website_lead_from_blob(
+    conn: sqlite3.Connection,
+    blob: str,
+    *,
+    owner: str = "",
+    status: str = "New",
+    product_interest: str = "",
+) -> Tuple[int, bool, bool]:
+    """
+    Parse a website form email body and create/update one CRM contact.
+
+    Returns: (contact_id, created_new_contact, added_note)
+    """
+    parsed = parse_website_request_blob(blob)
+
+    first_name = (parsed.get("first_name") or "").strip()
+    last_name = (parsed.get("last_name") or "").strip()
+    company = (parsed.get("company") or "").strip()
+    email_norm = _norm_email(parsed.get("email")) or None
+    phone = (parsed.get("phone") or "").strip()
+    application = normalize_application(parsed.get("application_raw")) if parsed.get("application_raw") else None
+    product = (product_interest or "").strip()
+    owner = (owner or "").strip()
+    status = (normalize_status(status) or status or "New").strip() or "New"
+
+    dedupe_key = compute_dedupe_key(first_name, last_name, company, email_norm, None) or None
+    cur = conn.cursor()
+    existing_id = _find_existing_contact_id(cur, dedupe_key or "", email_norm, None)
+    contact_updated = False
+
+    if existing_id:
+        contact_id = int(existing_id)
+        cur.execute(
+            """
+            UPDATE contacts SET
+              first_name=CASE WHEN first_name IS NULL OR TRIM(first_name)='' THEN ? ELSE first_name END,
+              last_name=CASE WHEN last_name IS NULL OR TRIM(last_name)='' THEN ? ELSE last_name END,
+              company=CASE WHEN company IS NULL OR TRIM(company)='' THEN ? ELSE company END,
+              email=CASE WHEN email IS NULL OR TRIM(email)='' THEN ? ELSE email END,
+              phone=CASE WHEN phone IS NULL OR TRIM(phone)='' THEN ? ELSE phone END,
+              owner=CASE WHEN owner IS NULL OR TRIM(owner)='' THEN ? ELSE owner END,
+              status=CASE WHEN status IS NULL OR TRIM(status)='' THEN ? ELSE status END,
+              application=CASE WHEN application IS NULL OR TRIM(application)='' THEN ? ELSE application END,
+              product_interest=CASE WHEN product_interest IS NULL OR TRIM(product_interest)='' THEN ? ELSE product_interest END,
+              dedupe_key=COALESCE(dedupe_key, ?)
+            WHERE id=?
+            """,
+            (
+                first_name or None,
+                last_name or None,
+                company or None,
+                email_norm,
+                phone or None,
+                owner or None,
+                status or "New",
+                application,
+                product or None,
+                dedupe_key,
+                contact_id,
+            ),
+        )
+        conn.commit()
+        contact_updated = True
+    else:
+        contact_id = create_contact(
+            conn,
+            {
+                "first_name": first_name,
+                "last_name": last_name,
+                "company": company,
+                "email": email_norm,
+                "phone": phone,
+                "owner": owner,
+                "status": status,
+                "application": application,
+                "product_interest": product,
+            },
+        )
+
+    note_added = False
+    note_text = (parsed.get("note") or "").strip()
+    if note_text:
+        ts_iso = datetime.utcnow().isoformat()
+        body = sanitize_note_text(note_text, trim_email_threads=False)
+        if body:
+            cur.execute("SELECT 1 FROM notes WHERE contact_id=? AND body=?", (contact_id, body))
+            if not cur.fetchone():
+                cur.execute(
+                    "INSERT INTO notes(contact_id, ts, body, next_followup) VALUES (?,?,?,?)",
+                    (contact_id, ts_iso, body, None),
+                )
+                cur.execute(
+                    "UPDATE contacts SET last_communication=?, last_touch=? WHERE id=?",
+                    (ts_iso, ts_iso, contact_id),
+                )
+                conn.commit()
+                note_added = True
+                backup_contacts(conn)
+
+    if contact_updated and not note_added:
+        backup_contacts(conn)
+
+    ensure_dedupe_index(conn)
+    return int(contact_id), existing_id is None, note_added
+
+
+def import_remote_form_queue(conn: sqlite3.Connection, limit: int = 50) -> Dict[str, Any]:
+    """
+    Import website form submissions saved by Power Automate into GitHub.
+
+    Expected queue: one .txt/.eml file per Outlook form email under
+    github_backup.form_queue_path, default data/incoming_forms.
+    """
+    cfg = _github_backup_config()
+    result: Dict[str, Any] = {
+        "seen": 0,
+        "imported": 0,
+        "created": 0,
+        "updated": 0,
+        "errors": [],
+    }
+    if not github_backup_enabled():
+        result["errors"].append("GitHub backup is not configured")
+        return result
+
+    try:
+        items = _github_list_dir(cfg["form_queue_path"])
+    except Exception as e:
+        result["errors"].append(f"Could not list form queue: {e}")
+        return result
+
+    files = [
+        it
+        for it in items
+        if it.get("type") == "file"
+        and str(it.get("name") or "").lower().endswith((".txt", ".eml"))
+    ]
+    files = sorted(files, key=lambda it: str(it.get("name") or ""))[: max(1, int(limit))]
+    result["seen"] = len(files)
+
+    for it in files:
+        path = str(it.get("path") or "")
+        name = str(it.get("name") or path)
+        try:
+            content, sha = _github_get_file(path)
+            if not content:
+                continue
+            blob = content.decode("utf-8", errors="replace")
+            if ":" not in blob:
+                result["errors"].append(f"Skipped {name}: no key/value lines found")
+                continue
+
+            contact_id, created_new, _note_added = create_website_lead_from_blob(conn, blob)
+            result["imported"] += 1
+            result["created" if created_new else "updated"] += 1
+
+            _github_delete_file(
+                path,
+                sha or str(it.get("sha") or ""),
+                f"Import CRM form queue item {name} into contact {contact_id}",
+            )
+        except Exception as e:
+            result["errors"].append(f"{name}: {e}")
+
+    return result
 
 
 # -------------------------------------------------------------
@@ -2660,6 +3010,31 @@ def show_priority_lists(conn: sqlite3.Connection):
 def sidebar_import_export(conn: sqlite3.Connection):
     st.sidebar.header("Import / Export")
 
+    if github_backup_enabled():
+        st.sidebar.caption("Remote backup: GitHub enabled")
+        if st.sidebar.button("Import Outlook form queue"):
+            res = import_remote_form_queue(conn)
+            if res.get("imported"):
+                st.sidebar.success(
+                    f"Imported {res['imported']} form(s): {res['created']} new, {res['updated']} updated"
+                )
+                st.rerun()
+            elif res.get("errors"):
+                st.sidebar.warning("; ".join(str(x) for x in res["errors"][:2]))
+            else:
+                st.sidebar.info("No queued Outlook forms found")
+
+        if st.sidebar.button("Pull latest GitHub backup"):
+            if fetch_remote_backup_to_file():
+                df = pd.read_csv(BACKUP_FILE)
+                n = upsert_contacts(conn, df)
+                st.sidebar.success(f"Restored/updated {n} contacts from GitHub backup")
+                st.rerun()
+            else:
+                st.sidebar.warning("No GitHub backup found or download failed")
+    else:
+        st.sidebar.caption("Remote backup: local only")
+
     if st.sidebar.button("🧹 Deduplicate database now"):
         removed = dedupe_database(conn)
         st.sidebar.success(f"Removed {removed} duplicate contacts")
@@ -2938,6 +3313,23 @@ def add_new_contact_form(conn: sqlite3.Connection):
                 st.rerun()
 
             if create_from_paste:
+                contact_id, created_new, note_added = create_website_lead_from_blob(
+                    conn,
+                    blob,
+                    owner=paste_owner,
+                    status=paste_status,
+                    product_interest=paste_product,
+                )
+
+                st.session_state["last_created_contact_id"] = contact_id
+                if created_new:
+                    st.success("Lead created from website paste. Opening it for editing...")
+                elif note_added:
+                    st.success("Existing lead updated with the website submission note. Opening it for editing...")
+                else:
+                    st.info("Existing lead found. Opening it for editing...")
+                st.rerun()
+
                 parsed = parse_website_request_blob(blob)
 
                 first_name = (parsed.get("first_name") or "").strip() or None
